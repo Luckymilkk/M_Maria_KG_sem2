@@ -35,8 +35,8 @@ struct ObjectConstants
 {
     XMFLOAT4X4 WorldViewProj = MathHelper::Identity4x4();
     XMFLOAT4X4 TexTransform = MathHelper::Identity4x4();
-    UINT MaterialIndex = 0; // Индекс текстуры для выбора в шейдере
-    UINT cbPad0; UINT cbPad1; UINT cbPad2; // Паддинг для выравнивания
+    float BlendFactor = 0.0f;
+    XMFLOAT3 cbPad; // Добавляем 3 float (12 байт), чтобы выровнять данные после BlendFactor
 };
 
 // 3. Структура для текстур
@@ -205,7 +205,6 @@ void BoxApp::BuildRootSignature()
 void BoxApp::BuildModelGeometry()
 {
     tinyobj::ObjReader reader;
-    // Путь к твоей звезде
     if (!reader.ParseFromFile("models/source/725b3a4da0ef_Tiny_green_starw__3.obj")) {
         return;
     }
@@ -253,7 +252,8 @@ void BoxApp::BuildModelGeometry()
 
 void BoxApp::Update(const GameTimer& gt)
 {
-    // 1. Обновляем положение камеры (этот блок у тебя уже есть)
+    // --- 1. ЛОГИКА КАМЕРЫ ---
+    // Преобразуем сферические координаты в декартовы
     float x = mRadius * sinf(mPhi) * cosf(mTheta);
     float z = mRadius * sinf(mPhi) * sinf(mTheta);
     float y = mRadius * cosf(mPhi);
@@ -265,30 +265,41 @@ void BoxApp::Update(const GameTimer& gt)
     XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
     XMStoreFloat4x4(&mView, view);
 
-    // 2. МАСШТАБИРОВАНИЕ (Уменьшаем модель)
-    // Если переменная 'world' уже была объявлена выше, просто убери слово 'XMMATRIX' перед ней
-    float s = 1.0f; // 0.1 = уменьшить в 10 раз
+    // --- 2. МАТРИЦА МИРА (МАСШТАБ И ПОВОРОТ) ---
+    float s = 1.0f; // Масштаб модели
     XMMATRIX world = XMMatrixScaling(s, s, s);
-
     XMStoreFloat4x4(&mWorld, world);
 
-    // 3. Вычисляем итоговую матрицу WVP
+    // --- 3. ВЫЧИСЛЕНИЕ WVP ---
     XMMATRIX proj = XMLoadFloat4x4(&mProj);
     XMMATRIX worldViewProj = world * view * proj;
 
-    // 4. Заполняем константы для шейдера
-    ObjectConstants objConstants;
-    // Не забывай про Транспонирование (XMMatrixTranspose)
-    XMStoreFloat4x4(&objConstants.WorldViewProj, XMMatrixTranspose(worldViewProj));
-
-    // Анимация и Тайлинг текстуры
+    // --- 4. АНИМАЦИЯ ТЕКСТУРНЫХ КООРДИНАТ (UV) ---
+    // Можно заставить текстуру медленно плыть
+    float texScrollSpeed = 0.05f;
     XMMATRIX texScale = XMMatrixScaling(1.0f, 1.0f, 1.0f);
-    XMMATRIX texOffset = XMMatrixTranslation(0.1f * gt.TotalTime(), 0.0f, 0.0f);
-    XMStoreFloat4x4(&objConstants.TexTransform, XMMatrixTranspose(texScale * texOffset));
+    XMMATRIX texOffset = XMMatrixTranslation(texScrollSpeed * gt.TotalTime(), 0.0f, 0.0f);
+    XMMATRIX texTransform = texScale * texOffset;
+    //XMMATRIX texTransform = XMMatrixIdentity();
 
-    objConstants.MaterialIndex = 0;
+   
+    // --- 5. РАСЧЕТ ПЛАВНОЙ ИНТЕРПОЛЯЦИИ ---
+    float time = gt.TotalTime();
+    float speed = 1.2f; // Скорость смены текстур
 
-    // Копируем данные в Upload Buffer
+    // sinf(t)
+    float blendFactor = sinf(time * speed) + 1.0f;
+
+    // --- 6. ЗАПОЛНЕНИЕ КОНСТАНТНОГО БУФЕРА ---
+    ObjectConstants objConstants;
+
+    // DX12 требует транспонирования матриц перед отправкой в шейдер
+    XMStoreFloat4x4(&objConstants.WorldViewProj, XMMatrixTranspose(worldViewProj));
+    XMStoreFloat4x4(&objConstants.TexTransform, XMMatrixTranspose(texTransform));
+
+    // Передаем наш фактор смешивания
+    objConstants.BlendFactor = blendFactor;
+
     mObjectCB->CopyData(0, objConstants);
 }
 
