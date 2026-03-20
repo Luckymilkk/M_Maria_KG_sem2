@@ -426,8 +426,21 @@ bool D3DApp::InitDirect3D()
 	ThrowIfFailed(CreateDXGIFactory1(IID_PPV_ARGS(&mdxgiFactory)));
 
 	// Try to create hardware device.
+	ComPtr<IDXGIAdapter1> adapter;
+	for (UINT i = 0; mdxgiFactory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i)
+	{
+		DXGI_ADAPTER_DESC1 desc;
+		adapter->GetDesc1(&desc);
+		// Пропускаем программный рендерер
+		if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+		// Берём первый не-Intel адаптер
+		std::wstring name(desc.Description);
+		if (name.find(L"Intel") == std::wstring::npos)
+			break;
+	}
+
 	HRESULT hardwareResult = D3D12CreateDevice(
-		nullptr,             // default adapter
+		adapter.Get(),
 		D3D_FEATURE_LEVEL_12_0,
 		IID_PPV_ARGS(&md3dDevice));
 

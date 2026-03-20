@@ -150,6 +150,8 @@
     <ClCompile Include="Common\GameTimer.cpp" />
     <ClCompile Include="Common\GeometryGenerator.cpp" />
     <ClCompile Include="Common\MathHelper.cpp" />
+    <ClCompile Include="GBuffer.cpp" />
+    <ClCompile Include="RenderingSystem.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\Common\UploadBuffer.h" />
@@ -163,6 +165,24 @@
     <ClInclude Include="Common\MathHelper.h" />
     <ClInclude Include="Common\tiny_obj_loader.h" />
     <ClInclude Include="Common\UploadBuffer.h" />
+    <ClInclude Include="GBuffer.h" />
+    <ClInclude Include="RenderingSystem.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="gbuffer.hlsl">
+      <FileType>Document</FileType>
+    </None>
+    <None Include="lighting.hlsl">
+      <FileType>Document</FileType>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Shaders\gbuffer.hlsl">
+      <FileType>Document</FileType>
+    </None>
+    <None Include="Shaders\lighting.hlsl">
+      <FileType>Document</FileType>
+    </None>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
