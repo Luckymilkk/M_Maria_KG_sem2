@@ -1,3 +1,10 @@
+// gbuffer.hlsl
+// Geometry pass: записываем данные в G-buffer.
+// RT0: Albedo (diffuse цвет)
+// RT1: Normal 
+// RT2: Specular (RGB) + Roughness (A)
+// Позиция восстанавливается из depth buffer в lighting pass
+
 Texture2D    gDiffuseMap : register(t0);
 SamplerState gsamLinear  : register(s0);
 
@@ -6,6 +13,8 @@ cbuffer cbPerObject : register(b0)
     float4x4 gWorldViewProj;
     float4x4 gWorld;
     float4x4 gWorldInvTranspose;
+    float     gTime; 
+    float3    pad;
 };
 
 struct VertexIn
@@ -35,16 +44,20 @@ VertexOut VS(VertexIn vin)
 
 struct PSOutput
 {
-    float4 Albedo   : SV_Target0;
-    float4 Normal   : SV_Target1;
-    float4 WorldPos : SV_Target2;
+    float4 Albedo   : SV_Target0; // RT0: diffuse цвет
+    float4 Normal   : SV_Target1; // RT1: нормаль в world space
+    float4 Specular : SV_Target2; // RT2: specular (RGB) + roughness (A)
 };
 
 PSOutput PS(VertexOut pin)
 {
     PSOutput output;
-    output.Albedo   = gDiffuseMap.Sample(gsamLinear, pin.TexC);
-    output.Normal   = float4(normalize(pin.NormalW), 0.0f);
-    output.WorldPos = float4(pin.PosW, 1.0f);
+
+    float2 animatedUV = pin.TexC + float2(gTime * 0.1f, 0.0f);
+    output.Albedo = gDiffuseMap.Sample(gsamLinear, animatedUV);
+    output.Normal = float4(normalize(pin.NormalW), 0.0f);
+    output.Specular = float4(0.5f, 0.5f, 0.5f, 0.5f);
+
     return output;
 }
+

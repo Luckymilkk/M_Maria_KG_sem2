@@ -42,6 +42,7 @@ struct RenderItem
 {
     std::string SubmeshName;
     int         TexSrvIndex;
+    bool        IsStar = false;
 };
 
 class BoxApp : public D3DApp
@@ -66,14 +67,10 @@ private:
 private:
     RenderingSystem mRenderingSystem;
 
-    // Куча для G-buffer RTV
-    ComPtr<ID3D12DescriptorHeap> mGbufferRtvHeap;
-
-    // Куча для G-buffer SRV (читается в lighting pass)
-    ComPtr<ID3D12DescriptorHeap> mSrvHeap;
-
-    // Отдельная куча для текстур объектов (читается в geometry pass)
-    ComPtr<ID3D12DescriptorHeap> mObjectSrvHeap;
+   
+    ComPtr<ID3D12DescriptorHeap> mGbufferRtvHeap;  // Куча для G-buffer RTV
+    ComPtr<ID3D12DescriptorHeap> mSrvHeap; // Куча для G-buffer SRV (читается в lighting pass)
+    ComPtr<ID3D12DescriptorHeap> mObjectSrvHeap; //куча для текстур объектов (читается в geometry pass)
 
     std::vector<RenderItem> mRenderItems;
     XMFLOAT3 mEyePosW = { 0.0f, 0.0f, 0.0f };
@@ -90,7 +87,8 @@ private:
 
     float mTheta = 1.5f * XM_PI;
     float mPhi = XM_PIDIV4;
-    float mRadius = 10.0f;
+    float mRadius = 7.0f;
+    float mStarRotation = 0.0f; 
     POINT mLastMousePos;
 };
 
@@ -188,6 +186,20 @@ void BoxApp::LoadTextures()
     if (mAllTextures.empty())
         addTex("default");
 
+    auto addTexDDS = [&](std::wstring path, std::string name) {
+        auto tex = std::make_unique<MyTexture>();
+        tex->Name = name;
+        tex->Filename = path;
+        ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(
+            md3dDevice.Get(), mCommandList.Get(),
+            path.c_str(), tex->Resource, tex->UploadHeap));
+        mAllTextures.push_back(std::move(tex));
+        };
+
+    addTexDDS(L"models/source/725b3a4da0ef_Tiny_green_starw__3_texture_kd.dds", "star_diffuse");
+    addTexDDS(L"models/source/725b3a4da0ef_Tiny_green_starw__3_roughness.dds", "star_roughness");
+    addTexDDS(L"models/source/725b3a4da0ef_Tiny_green_starw__3_metallic.dds", "star_metallic");
+
    
 }
 
@@ -195,28 +207,27 @@ void BoxApp::BuildDescriptorHeaps()
 {
     LoadTextures();
 
-    // G-buffer RTV куча (3 слота)
+    //RTV куча 3 слота
     D3D12_DESCRIPTOR_HEAP_DESC rtvDesc = {};
     rtvDesc.NumDescriptors = GBuffer::NumRTs;
     rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     rtvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&mGbufferRtvHeap)));
 
-    // G-buffer SRV куча (3 слота, для lighting pass)
+    // SRV куча  для lighting pass
     D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
     srvDesc.NumDescriptors = GBuffer::NumRTs;
     srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&mSrvHeap)));
 
-    // Отдельная куча для текстур объектов (для geometry pass)
+    // куча для текстур объектов
     D3D12_DESCRIPTOR_HEAP_DESC objSrvDesc = {};
     objSrvDesc.NumDescriptors = 64;
     objSrvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     objSrvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&objSrvDesc, IID_PPV_ARGS(&mObjectSrvHeap)));
 
-    // Инициализируем RenderingSystem
     mRenderingSystem.Init(
         md3dDevice.Get(), mCommandList.Get(),
         mClientWidth, mClientHeight,
@@ -264,6 +275,7 @@ void BoxApp::BuildModelGeometry()
         MessageBoxA(nullptr, reader.Error().c_str(), "OBJ Load Error", MB_OK);
         return;
     }
+
 
     auto& attrib = reader.GetAttrib();
     auto& shapes = reader.GetShapes();
@@ -333,9 +345,66 @@ void BoxApp::BuildModelGeometry()
         RenderItem ri;
         ri.SubmeshName = shape.name;
         ri.TexSrvIndex = texIndex;
+        ri.IsStar = false;
         mRenderItems.push_back(ri);
     }
 
+    {
+        tinyobj::ObjReader reader;
+        tinyobj::ObjReaderConfig config;
+        config.triangulate = true;
+        reader.ParseFromFile("models/source/725b3a4da0ef_Tiny_green_starw__3.obj", config);
+
+        auto& attrib = reader.GetAttrib();
+        auto& shapes = reader.GetShapes();
+
+        UINT indexOffset = (UINT)allIndices.size(); 
+        UINT indexCount = 0;
+
+        for (const auto& shape : shapes)
+        {
+            for (const auto& index : shape.mesh.indices)
+            {
+                Vertex v = {};
+                v.Pos = { attrib.vertices[3 * index.vertex_index + 0],
+                             attrib.vertices[3 * index.vertex_index + 1],
+                             attrib.vertices[3 * index.vertex_index + 2] };
+                if (index.normal_index >= 0)
+                    v.Normal = { attrib.normals[3 * index.normal_index + 0],
+                                 attrib.normals[3 * index.normal_index + 1],
+                                 attrib.normals[3 * index.normal_index + 2] };
+                if (index.texcoord_index >= 0)
+                    v.TexC = { attrib.texcoords[2 * index.texcoord_index + 0],
+                               1.0f - attrib.texcoords[2 * index.texcoord_index + 1] };
+                allVertices.push_back(v);
+                allIndices.push_back((UINT)(allVertices.size() - 1));
+                ++indexCount;
+            }
+        }
+
+        SubmeshGeometry submesh;
+        submesh.IndexCount = indexCount;
+        submesh.StartIndexLocation = indexOffset; 
+        submesh.BaseVertexLocation = 0;
+        mModelGeo->DrawArgs["star"] = submesh;
+
+        int texIndex = 0;
+        for (int i = 0; i < (int)mAllTextures.size(); ++i)
+        {
+            if (mAllTextures[i]->Name == "star_diffuse")
+            {
+                texIndex = i; break;
+            }
+        }
+
+        RenderItem ri;
+        ri.SubmeshName = "star";
+        ri.TexSrvIndex = texIndex;
+        ri.IsStar = true;
+        mRenderItems.push_back(ri);
+    }
+
+    // Загрузка в GPU
     const UINT vbSize = (UINT)allVertices.size() * sizeof(Vertex);
     const UINT ibSize = (UINT)allIndices.size() * sizeof(std::uint32_t);
 
@@ -365,6 +434,8 @@ void BoxApp::Update(const GameTimer& gt)
 
     mEyePosW = { x, y, z };
 
+    mStarRotation += gt.DeltaTime() * 0.0f;
+
     XMVECTOR pos = XMVectorSet(x, y, z, 1.0f);
     XMVECTOR target = XMVectorZero();
     XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
@@ -372,6 +443,7 @@ void BoxApp::Update(const GameTimer& gt)
 
     float s = 0.01f;
     XMStoreFloat4x4(&mWorld, XMMatrixScaling(s, s, s));
+
 }
 
 void BoxApp::Draw(const GameTimer& gt)
@@ -387,13 +459,14 @@ void BoxApp::Draw(const GameTimer& gt)
         D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
         1.0f, 0, 0, nullptr);
 
-    // ====================================================
-    // GEOMETRY PASS — используем кучу текстур объектов
-    // ====================================================
+
+    // GEOMETRY PASS 
     {
         ID3D12DescriptorHeap* heaps[] = { mObjectSrvHeap.Get() };
         mCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
     }
+
+
 
     mRenderingSystem.BeginGeometryPass(mCommandList.Get(), DepthStencilView());
 
@@ -411,6 +484,22 @@ void BoxApp::Draw(const GameTimer& gt)
         XMMatrixTranspose(wit));
     mRenderingSystem.SetGeometryPassConstants(geomConsts);
 
+    XMMATRIX starWorld = XMMatrixScaling(1.0f, 1.0f, 1.0f) *
+        XMMatrixRotationY(mStarRotation) *
+        XMMatrixTranslation(3.0f, 1.5f, 0.0f);
+
+    GeometryPassConstants starConsts;
+    XMStoreFloat4x4(&starConsts.WorldViewProj,
+        XMMatrixTranspose(starWorld * view * proj));
+    XMStoreFloat4x4(&starConsts.World,
+        XMMatrixTranspose(starWorld));
+    XMMATRIX starWit = XMMatrixTranspose(XMMatrixInverse(nullptr, starWorld));
+    XMStoreFloat4x4(&starConsts.WorldInvTranspose,
+        XMMatrixTranspose(starWit));
+
+    geomConsts.Time = 0.0f;         
+    starConsts.Time = gt.TotalTime();
+
     UINT srvSize = md3dDevice->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
@@ -418,8 +507,30 @@ void BoxApp::Draw(const GameTimer& gt)
     mCommandList->IASetIndexBuffer(&mModelGeo->IndexBufferView());
     mCommandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
+    // рисуем Sponza
+    mRenderingSystem.SetGeometryPassConstants(geomConsts);
     for (const auto& ri : mRenderItems)
     {
+        if (ri.IsStar) continue;
+
+        CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(
+            mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
+        texHandle.Offset(ri.TexSrvIndex, srvSize);
+        mCommandList->SetGraphicsRootDescriptorTable(1, texHandle);
+
+        const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
+        mCommandList->DrawIndexedInstanced(
+            sub.IndexCount, 1,
+            sub.StartIndexLocation,
+            sub.BaseVertexLocation, 0);
+    }
+
+    //рисуем звёздочку
+    mRenderingSystem.SetGeometryPassConstants(starConsts);
+    for (const auto& ri : mRenderItems)
+    {
+        if (!ri.IsStar) continue; 
+
         CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(
             mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
         texHandle.Offset(ri.TexSrvIndex, srvSize);
@@ -434,9 +545,7 @@ void BoxApp::Draw(const GameTimer& gt)
 
     mRenderingSystem.EndGeometryPass(mCommandList.Get());
 
-    // ====================================================
-    // LIGHTING PASS — переключаемся на кучу G-buffer SRV
-    // ====================================================
+    // LIGHTING PASS 
     {
         ID3D12DescriptorHeap* heaps[] = { mSrvHeap.Get() };
         mCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
@@ -456,9 +565,7 @@ void BoxApp::Draw(const GameTimer& gt)
         DepthStencilView(),
         mEyePosW);
 
-    // ====================================================
     // PRESENT
-    // ====================================================
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         CurrentBackBuffer(),
         D3D12_RESOURCE_STATE_RENDER_TARGET,

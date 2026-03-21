@@ -4,18 +4,13 @@
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
 
-// ============================================================
-// Вспомогательная структура для вершины fullscreen quad
-// ============================================================
 struct QuadVertex
 {
     XMFLOAT3 Pos;
     XMFLOAT2 TexC;
 };
 
-// ============================================================
-// Init
-// ============================================================
+
 void RenderingSystem::Init(
     ID3D12Device* device,
     ID3D12GraphicsCommandList* cmdList,
@@ -32,19 +27,18 @@ void RenderingSystem::Init(
     mSrvHeap            = srvHeap;
     mGbufferSrvOffset   = gbufferSrvOffset;
 
-    // 1. Инициализируем G-buffer — создаёт текстуры RT0, RT1, RT2
+    //G-buffer — создаёт текстуры RT0, RT1, RT2
     mGBuffer.Init(device, width, height, rtvHeap, srvHeap, gbufferRtvOffset, gbufferSrvOffset);
 
-    // 2. Создаём константные буферы
+    // константные буферы
     mGeomCB   = std::make_unique<UploadBuffer<GeometryPassConstants>>(device, 1, true);
     mLightCB  = std::make_unique<UploadBuffer<LightingPassConstants>>(device, 1, true);
 
-    // 3. Компилируем шейдеры и создаём PSO
+    //Компиляция шейдеров, создание PSO
     BuildRootSignatures(device);
     BuildGeometryPassPSO(device, depthStencilFormat);
     BuildLightingPassPSO(device, backBufferFormat, depthStencilFormat);
 
-    // 4. Создаём fullscreen quad для lighting pass
     BuildFullscreenQuad(device, cmdList);
 }
 
@@ -61,9 +55,7 @@ void RenderingSystem::OnResize(
     mGBuffer.OnResize(device, width, height, rtvHeap, srvHeap, gbufferRtvOffset, gbufferSrvOffset);
 }
 
-// ============================================================
-// Источники света
-// ============================================================
+
 void RenderingSystem::AddDirectionalLight(XMFLOAT3 direction, XMFLOAT3 color, float intensity)
 {
     if ((int)mLights.size() >= kMaxLights) return;
@@ -99,9 +91,7 @@ void RenderingSystem::AddSpotLight(XMFLOAT3 position, XMFLOAT3 direction,
     mLights.push_back(l);
 }
 
-// ============================================================
-// Geometry pass
-// ============================================================
+
 void RenderingSystem::BeginGeometryPass(
     ID3D12GraphicsCommandList* cmdList,
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle)
@@ -109,13 +99,10 @@ void RenderingSystem::BeginGeometryPass(
     // Переводим G-buffer текстуры в режим записи
     mGBuffer.TransitionToWrite(cmdList);
 
-    // Очищаем RT'ы
     mGBuffer.ClearRenderTargets(cmdList);
 
-    // Устанавливаем G-buffer как цели рендеринга
     mGBuffer.BindAsRenderTargets(cmdList, dsvHandle);
 
-    // Привязываем geometry PSO и root signature
     cmdList->SetPipelineState(mGeometryPSO.Get());
     cmdList->SetGraphicsRootSignature(mGeometryRootSig.Get());
 
@@ -125,7 +112,6 @@ void RenderingSystem::BeginGeometryPass(
 
 void RenderingSystem::EndGeometryPass(ID3D12GraphicsCommandList* cmdList)
 {
-    // Переводим G-buffer в режим чтения для следующего прохода
     mGBuffer.TransitionToRead(cmdList);
 }
 
@@ -134,16 +120,12 @@ void RenderingSystem::SetGeometryPassConstants(const GeometryPassConstants& cons
     mGeomCB->CopyData(0, constants);
 }
 
-// ============================================================
-// Lighting pass
-// ============================================================
 void RenderingSystem::DoLightingPass(
     ID3D12GraphicsCommandList* cmdList,
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle,
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle,
     XMFLOAT3 eyePos)
 {
-    // --- Заполняем константный буфер освещения ---
     LightingPassConstants lightConsts = {};
     lightConsts.NumLights = (int)mLights.size();
     lightConsts.EyePosW   = eyePos;
@@ -151,32 +133,26 @@ void RenderingSystem::DoLightingPass(
         lightConsts.Lights[i] = mLights[i];
     mLightCB->CopyData(0, lightConsts);
 
-    // --- Устанавливаем back buffer как RT ---
+    //back buffer как RT 
     cmdList->OMSetRenderTargets(1, &rtvHandle, true, &dsvHandle);
 
-    // --- Привязываем lighting PSO ---
     cmdList->SetPipelineState(mLightingPSO.Get());
     cmdList->SetGraphicsRootSignature(mLightingRootSig.Get());
 
-    // --- Привязываем ресурсы ---
-    // Слот 0: константный буфер с данными освещения (b0)
     cmdList->SetGraphicsRootConstantBufferView(0, mLightCB->Resource()->GetGPUVirtualAddress());
     // Слот 1: таблица текстур G-buffer (t0, t1, t2)
     cmdList->SetGraphicsRootDescriptorTable(1, mGBuffer.GetSRVTable());
 
-    // --- Рисуем fullscreen quad ---
-    // 6 вершин = 2 треугольника, покрывающих весь экран
+
     cmdList->IASetVertexBuffers(0, 1, &mQuadVBView);
     cmdList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList->DrawInstanced(6, 1, 0, 0);
 }
 
-// ============================================================
-// PSO и шейдеры
-// ============================================================
+
 void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
 {
-    // --- Geometry pass root signature ---
+    //Geometry pass root signature 
     {
         CD3DX12_DESCRIPTOR_RANGE texTable;
         texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
@@ -195,7 +171,7 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
             serial->GetBufferSize(), IID_PPV_ARGS(&mGeometryRootSig)));
     }
 
-    // --- Lighting pass root signature ---
+    //Lighting pass root signature 
     {
         CD3DX12_DESCRIPTOR_RANGE gbufTable;
         gbufTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::NumRTs, 0);
@@ -216,7 +192,6 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
 }
 void RenderingSystem::BuildGeometryPassPSO(ID3D12Device* device, DXGI_FORMAT depthFmt)
 {
-    // Компилируем geometry pass шейдеры
     mGeomVS = d3dUtil::CompileShader(L"Shaders\\gbuffer.hlsl", nullptr, "VS", "vs_5_1");
     mGeomPS = d3dUtil::CompileShader(L"Shaders\\gbuffer.hlsl", nullptr, "PS", "ps_5_1");
 
@@ -238,7 +213,6 @@ void RenderingSystem::BuildGeometryPassPSO(ID3D12Device* device, DXGI_FORMAT dep
     psoDesc.SampleMask        = UINT_MAX;
     psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 
-    // Записываем в 3 RT'а одновременно (MRT)
     psoDesc.NumRenderTargets = GBuffer::NumRTs;
     for (int i = 0; i < GBuffer::NumRTs; ++i)
         psoDesc.RTVFormats[i] = GBuffer::GetFormat(i);
@@ -255,7 +229,6 @@ void RenderingSystem::BuildLightingPassPSO(ID3D12Device* device,
     mLightVS = d3dUtil::CompileShader(L"Shaders\\lighting.hlsl", nullptr, "VS", "vs_5_1");
     mLightPS = d3dUtil::CompileShader(L"Shaders\\lighting.hlsl", nullptr, "PS", "ps_5_1");
 
-    // Lighting pass рисует fullscreen quad — те же атрибуты (Pos, TexC)
     std::vector<D3D12_INPUT_ELEMENT_DESC> inputLayout = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -267,7 +240,7 @@ void RenderingSystem::BuildLightingPassPSO(ID3D12Device* device,
     psoDesc.VS             = { mLightVS->GetBufferPointer(), mLightVS->GetBufferSize() };
     psoDesc.PS             = { mLightPS->GetBufferPointer(), mLightPS->GetBufferSize() };
     psoDesc.RasterizerState   = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; // quad двусторонний
+    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; 
     psoDesc.BlendState        = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
 
     // Lighting pass не пишет в depth
@@ -279,7 +252,7 @@ void RenderingSystem::BuildLightingPassPSO(ID3D12Device* device,
     psoDesc.SampleMask       = UINT_MAX;
     psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     psoDesc.NumRenderTargets = 1;
-    psoDesc.RTVFormats[0]    = backBufferFmt; // пишем в back buffer
+    psoDesc.RTVFormats[0]    = backBufferFmt;
     psoDesc.SampleDesc.Count = 1;
     psoDesc.DSVFormat        = depthFmt;
 
@@ -289,15 +262,14 @@ void RenderingSystem::BuildLightingPassPSO(ID3D12Device* device,
 void RenderingSystem::BuildFullscreenQuad(ID3D12Device* device,
                                            ID3D12GraphicsCommandList* cmdList)
 {
-    // Два треугольника, покрывающих NDC [-1,1] x [-1,1]
-    // UV идут от (0,0) до (1,1)
+    
     QuadVertex verts[6] = {
-        { { -1.0f,  1.0f, 0.0f }, { 0.0f, 0.0f } }, // левый верх
-        { {  1.0f,  1.0f, 0.0f }, { 1.0f, 0.0f } }, // правый верх
-        { { -1.0f, -1.0f, 0.0f }, { 0.0f, 1.0f } }, // левый низ
-        { { -1.0f, -1.0f, 0.0f }, { 0.0f, 1.0f } }, // левый низ
-        { {  1.0f,  1.0f, 0.0f }, { 1.0f, 0.0f } }, // правый верх
-        { {  1.0f, -1.0f, 0.0f }, { 1.0f, 1.0f } }, // правый низ
+        { { -1.0f,  1.0f, 0.0f }, { 0.0f, 0.0f } }, 
+        { {  1.0f,  1.0f, 0.0f }, { 1.0f, 0.0f } }, 
+        { { -1.0f, -1.0f, 0.0f }, { 0.0f, 1.0f } }, 
+        { { -1.0f, -1.0f, 0.0f }, { 0.0f, 1.0f } }, 
+        { {  1.0f,  1.0f, 0.0f }, { 1.0f, 0.0f } }, 
+        { {  1.0f, -1.0f, 0.0f }, { 1.0f, 1.0f } },
     };
 
     UINT byteSize = sizeof(verts);
