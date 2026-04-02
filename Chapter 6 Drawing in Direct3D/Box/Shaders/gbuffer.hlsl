@@ -53,8 +53,15 @@ PSOutput PS(VertexOut pin)
 {
     PSOutput output;
 
-    output.Albedo = gDiffuseMap.Sample(gsamLinear, pin.TexC);   
-    output.Normal = float4(normalize(pin.NormalW), 0.0f);
+    float4 albedo = gDiffuseMap.Sample(gsamLinear, pin.TexC);
+    if (max(albedo.r, max(albedo.g, albedo.b)) < 0.03f)
+        albedo.rgb = float3(0.6f, 0.6f, 0.6f);
+    output.Albedo = albedo;
+
+    float3 n = pin.NormalW;
+    float n2 = dot(n, n);
+    n = (n2 > 1e-6f) ? normalize(n) : float3(0.0f, 1.0f, 0.0f);
+    output.Normal = float4(n, 0.0f);
     output.Specular = float4(0.5f, 0.5f, 0.5f, 0.5f);
 
     return output;

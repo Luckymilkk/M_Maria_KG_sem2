@@ -29,7 +29,8 @@ void RenderingSystem::Init(
 
     mGBuffer.Init(device, width, height, rtvHeap, srvHeap, gbufferRtvOffset, gbufferSrvOffset);
 
-    mGeomCB = std::make_unique<UploadBuffer<GeometryPassConstants>>(device, 1, true);
+    mGeomCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(GeometryPassConstants));
+    mGeomCB = std::make_unique<UploadBuffer<GeometryPassConstants>>(device, kMaxGeometryCBs, true);
     mLightCB = std::make_unique<UploadBuffer<LightingPassConstants>>(device, 1, true);
 
     BuildRootSignatures(device);
@@ -107,9 +108,18 @@ void RenderingSystem::EndGeometryPass(ID3D12GraphicsCommandList* cmdList)
     mGBuffer.TransitionToRead(cmdList);
 }
 
-void RenderingSystem::SetGeometryPassConstants(const GeometryPassConstants& constants)
+void RenderingSystem::SetGeometryPassConstants(
+    ID3D12GraphicsCommandList* cmdList,
+    const GeometryPassConstants& constants,
+    UINT cbIndex)
 {
-    mGeomCB->CopyData(0, constants);
+    if (cbIndex >= kMaxGeometryCBs)
+        cbIndex = kMaxGeometryCBs - 1;
+
+    mGeomCB->CopyData((int)cbIndex, constants);
+    D3D12_GPU_VIRTUAL_ADDRESS addr =
+        mGeomCB->Resource()->GetGPUVirtualAddress() + (UINT64)cbIndex * mGeomCBByteSize;
+    cmdList->SetGraphicsRootConstantBufferView(0, addr);
 }
 
 void RenderingSystem::DoLightingPass(
@@ -125,11 +135,15 @@ void RenderingSystem::DoLightingPass(
     LightingPassConstants lightConsts = {};
     lightConsts.NumLights = (int)mLights.size();
     lightConsts.EyePosW = eyePos;
+
+    // Эти матрицы уже должны быть транспонированы в BoxApp::Draw
     lightConsts.InvViewProj = invViewProj;
     lightConsts.InvView = invView;
     lightConsts.InvProj = invProj;
+
     for (int i = 0; i < (int)mLights.size(); ++i)
         lightConsts.Lights[i] = mLights[i];
+
     mLightCB->CopyData(0, lightConsts);
 
     cmdList->OMSetRenderTargets(1, &rtvHandle, true, &dsvHandle);

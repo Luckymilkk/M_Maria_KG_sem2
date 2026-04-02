@@ -35,7 +35,7 @@ struct GeometryPassConstants
 };
 
 
-static const int kMaxLights = 16;
+static const int kMaxLights = 64;
 
 struct LightingPassConstants
 {
@@ -105,7 +105,10 @@ public:
 
     void EndGeometryPass(ID3D12GraphicsCommandList* cmdList);
 
-    void SetGeometryPassConstants(const GeometryPassConstants& constants);
+    void SetGeometryPassConstants(
+        ID3D12GraphicsCommandList* cmdList,
+        const GeometryPassConstants& constants,
+        UINT cbIndex);
 
     ID3D12RootSignature* GetGeometryRootSignature() const { return mGeometryRootSig.Get(); }
     ID3D12PipelineState* GetGeometryPSO()           const { return mGeometryPSO.Get(); }
@@ -143,6 +146,8 @@ private:
 
     std::unique_ptr<UploadBuffer<GeometryPassConstants>>  mGeomCB;
     std::unique_ptr<UploadBuffer<LightingPassConstants>>  mLightCB;
+    UINT mGeomCBByteSize = 0;
+    static const UINT kMaxGeometryCBs = 512;
 
     std::vector<LightData> mLights;
 
