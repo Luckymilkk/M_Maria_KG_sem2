@@ -53,8 +53,7 @@ PSOutput PS(VertexOut pin)
 {
     PSOutput output;
 
-    float2 animatedUV = pin.TexC + float2(gTime * 0.1f, 0.0f);
-    output.Albedo = gDiffuseMap.Sample(gsamLinear, animatedUV);
+    output.Albedo = gDiffuseMap.Sample(gsamLinear, pin.TexC);   
     output.Normal = float4(normalize(pin.NormalW), 0.0f);
     output.Specular = float4(0.5f, 0.5f, 0.5f, 0.5f);
 

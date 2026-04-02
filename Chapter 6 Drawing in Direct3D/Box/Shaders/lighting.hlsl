@@ -5,12 +5,15 @@
 //   t0: Albedo   (diffuse цвет)
 //   t1: Normal  
 //   t2: Specular (RGB=specular, A=roughness)
+//   t3: Depth buffer (для восстановления world position)
 //
-// Позиция восстанавливается из depth buffer по экранным координатам.
+// World position восстанавливается из depth buffer по экранным координатам
+// через обратную матрицу ViewProj — без хранения позиции в GBuffer.
 
-Texture2D gAlbedo   : register(t0);
-Texture2D gNormal   : register(t1);
-Texture2D gSpecular : register(t2);
+Texture2D          gAlbedo   : register(t0);
+Texture2D          gNormal   : register(t1);
+Texture2D          gSpecular : register(t2);
+Texture2D<float>   gDepth    : register(t3);
 
 SamplerState gsamPoint : register(s0);
 
@@ -29,6 +32,8 @@ struct LightData
     int    Type;
 };
 
+
+
 cbuffer cbLighting : register(b0)
 {
     LightData gLights[kMaxLights];
@@ -38,6 +43,9 @@ cbuffer cbLighting : register(b0)
     float     pad2;
     float3    gEyePosW;
     float     pad3;
+    float4x4  gInvViewProj;
+    float4x4  gInvView;
+    float4x4  gInvProj;
 };
 
 struct VertexIn  { float3 PosL : POSITION; float2 TexC : TEXCOORD; };
@@ -49,6 +57,19 @@ VertexOut VS(VertexIn vin)
     vout.PosH = float4(vin.PosL, 1.0f);
     vout.TexC = vin.TexC;
     return vout;
+}
+
+
+float3 ReconstructWorldPos(float2 texC, float depth)
+{
+    float x = texC.x * 2.0f - 1.0f;
+    float y = (1.0f - texC.y) * 2.0f - 1.0f;
+    
+    float4 ndcPos  = float4(x, y, depth, 1.0f);
+    float4 viewPos = mul(ndcPos, gInvProj);
+    viewPos        = viewPos / viewPos.w;
+    float4 worldPos = mul(gInvView, viewPos);
+    return worldPos.xyz;
 }
 
 float CalcAttenuation(float distance, float range)
@@ -73,59 +94,61 @@ float3 CalcSpecular(float3 normal, float3 lightDir, float3 toEye,
 
 float4 PS(VertexOut pin) : SV_Target
 {
+    float depth = gDepth.Load(int3(pin.PosH.xy, 0));
+
+    if (depth >= 1.0f)
+        return float4(0.0f, 0.0f, 0.0f, 1.0f);
+
+    float3 posW   = ReconstructWorldPos(pin.TexC, depth);
+
     float4 albedo   = gAlbedo.Sample(gsamPoint, pin.TexC);
     float3 normal   = normalize(gNormal.Sample(gsamPoint, pin.TexC).xyz);
     float4 specData = gSpecular.Sample(gsamPoint, pin.TexC);
 
     float3 specColor = specData.rgb;
     float  roughness = specData.a;
-    // Shininess: чем меньше roughness тем острее блик
     float  shininess = max(1.0f, (1.0f - roughness) * 128.0f);
 
-    // Направление к камере(смотрит на центр сцены)
-    float3 toEye = normalize(gEyePosW);
-
-    float3 ambient    = albedo.rgb * 0.05f;
-    float3 totalLight = ambient;
+    float3 toEye     = normalize(gEyePosW - posW);
+    float3 totalLight = albedo.rgb * 0.1f;
 
     for (int i = 0; i < gNumLights; ++i)
     {
         LightData light = gLights[i];
         float3 diffuse  = 0.0f;
         float3 specular = 0.0f;
+        float3 lightDir = 0.0f;
+        float  atten    = 1.0f;
 
         if (light.Type == LIGHT_DIRECTIONAL)
         {
-            float3 lightDir = normalize(-light.Direction);
-            diffuse  = CalcDiffuse(normal, lightDir, light.Color);
-            specular = CalcSpecular(normal, lightDir, toEye, specColor * light.Color, shininess);
+            lightDir = normalize(-light.Direction);
         }
         else if (light.Type == LIGHT_POINT)
         {
-            // Без точной позиции используем направление источника от центра
-            float3 lightDir = normalize(light.Position);
-            float  dist     = length(light.Position);
-            float  atten    = CalcAttenuation(dist, light.Range);
-
-            diffuse  = CalcDiffuse(normal, lightDir, light.Color) * atten;
-            specular = CalcSpecular(normal, lightDir, toEye, specColor * light.Color, shininess) * atten;
+            float3 toLight = light.Position - posW;
+            float  dist    = length(toLight);
+            if (dist > light.Range) continue;
+            lightDir = toLight / dist;
+            atten    = CalcAttenuation(dist, light.Range);
         }
         else if (light.Type == LIGHT_SPOT)
         {
-            float3 lightDir  = normalize(light.Position);
-            float  dist      = length(light.Position);
-            float  atten     = CalcAttenuation(dist, light.Range);
-            float  cosAngle  = dot(-lightDir, normalize(light.Direction));
-            float  cosOuter  = cos(light.SpotAngle);
-            float  spotFactor = smoothstep(cosOuter, cosOuter + 0.1f, cosAngle);
-
-            diffuse  = CalcDiffuse(normal, lightDir, light.Color) * atten * spotFactor;
-            specular = CalcSpecular(normal, lightDir, toEye, specColor * light.Color, shininess) * atten * spotFactor;
+            float3 toLight = light.Position - posW;
+            float  dist    = length(toLight);
+            if (dist > light.Range) continue;
+            lightDir     = toLight / dist;
+            atten        = CalcAttenuation(dist, light.Range);
+            float cosAngle  = dot(-lightDir, normalize(light.Direction));
+            float cosOuter  = cos(light.SpotAngle);
+            float spotFactor = smoothstep(cosOuter, cosOuter + 0.05f, cosAngle);
+            atten *= spotFactor;
         }
 
-        totalLight += diffuse * albedo.rgb + specular;
+        diffuse  = CalcDiffuse(normal, lightDir, light.Color) * atten;
+        specular = CalcSpecular(normal, lightDir, toEye, specColor * light.Color, shininess) * atten;
+        totalLight += (diffuse * albedo.rgb) + specular;
     }
 
     return float4(totalLight, albedo.a);
 }
-
