@@ -46,10 +46,10 @@ struct LightingPassConstants
     float               pad2;
     DirectX::XMFLOAT3   EyePosW;
     float               pad3;
-    // Обратная ViewProj — для восстановления world position из depth в шейдере
+    
     DirectX::XMFLOAT4X4 InvViewProj = MathHelper::Identity4x4();
-    DirectX::XMFLOAT4X4 InvView;      // добавить
-    DirectX::XMFLOAT4X4 InvProj;      // добавить
+    DirectX::XMFLOAT4X4 InvView;      
+    DirectX::XMFLOAT4X4 InvProj;      
 };
 
 class RenderingSystem
@@ -114,7 +114,6 @@ public:
     ID3D12PipelineState* GetGeometryPSO()           const { return mGeometryPSO.Get(); }
     ID3D12Resource* GetGeometryCBResource()    const { return mGeomCB->Resource(); }
 
-    // depthSrvHandle — GPU-хэндл SRV на depth buffer (передаётся из BoxApp)
     void DoLightingPass(ID3D12GraphicsCommandList* cmdList,
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle,
         D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle,

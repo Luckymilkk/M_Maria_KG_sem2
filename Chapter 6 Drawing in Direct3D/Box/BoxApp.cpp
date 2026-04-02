@@ -40,7 +40,6 @@ struct RenderItem
     bool        IsStar = false;
 };
 
-// Möller–Trumbore ray-triangle intersection
 static bool RayTriangleIntersect(
     FXMVECTOR orig, FXMVECTOR dir,
     FXMVECTOR v0, GXMVECTOR v1, HXMVECTOR v2,
@@ -99,12 +98,11 @@ private:
 
     static const UINT mGbufferRtvOffset = 0;
     static const UINT mGbufferSrvOffset = 0;
-    static const UINT mDepthSrvOffset = GBuffer::NumRTs; // слот 3
+    static const UINT mDepthSrvOffset = GBuffer::NumRTs; 
 
     std::vector<std::unique_ptr<MyTexture>> mAllTextures;
     std::unique_ptr<MeshGeometry> mModelGeo = nullptr;
 
-    // CPU вершины Sponza для ray cast
     std::vector<XMFLOAT3>    mCpuVertices;
     std::vector<uint32_t>    mCpuIndices;
     XMFLOAT4X4 mSponzaWorld = MathHelper::Identity4x4();
@@ -121,19 +119,19 @@ private:
 
     struct ShotLight
     {
-        XMFLOAT3 Origin;       // Стартовая позиция (камера в момент выстрела)
-        XMFLOAT3 Direction;    // Нормализованное направление полёта в world space
-        XMFLOAT3 Position;     // Текущая позиция
-        XMFLOAT3 Velocity;     // Вектор скорости (направление * скорость)
+        XMFLOAT3 Origin;       
+        XMFLOAT3 Direction;    
+        XMFLOAT3 Position;     
+        XMFLOAT3 Velocity;     
         XMFLOAT3 Color;
         float    Range;
-        float    TargetT;      // Дистанция до столкновения
-        float    CurrentT;     // Пройденная дистанция
-        bool     IsFlying;     // Флаг: летит или уже на стене
+        float    TargetT;      
+        float    CurrentT;     
+        bool     IsFlying;     
     };
 
     std::vector<ShotLight> mShotLights;
-    const float mLightSpeed = 28.0f; // Скорость полета света
+    const float mLightSpeed = 150.0f;
     int mShotCount = 0;
     bool mShootRequested = false;
     static const size_t mMaxShotLights = 48;
@@ -280,7 +278,6 @@ void BoxApp::BuildDescriptorHeaps()
     rtvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&mGbufferRtvHeap)));
 
-    // 3 GBuffer SRV + 1 Depth SRV = 4 слота
     D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
     srvDesc.NumDescriptors = GBuffer::NumRTs + 1;
     srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -319,7 +316,7 @@ void BoxApp::BuildModelGeometry()
 {
     tinyobj::ObjReader       reader;
     tinyobj::ObjReaderConfig config;
-    config.triangulate = true; // важно для ray cast
+    config.triangulate = true; 
 
     if (!reader.ParseFromFile("Sponza-master/sponza.obj", config))
     {
@@ -361,14 +358,14 @@ void BoxApp::BuildModelGeometry()
                     attrib.normals[3 * index.normal_index + 2]
             };
             else
-                v.Normal = { 0.0f, 1.0f, 0.0f }; // fallback для мешей без нормалей
+                v.Normal = { 0.0f, 1.0f, 0.0f };
             if (index.texcoord_index >= 0)
                 v.TexC = {
                     attrib.texcoords[2 * index.texcoord_index + 0],
                     1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
             };
             else
-                v.TexC = { 0.0f, 0.0f }; // fallback для мешей без UV
+                v.TexC = { 0.0f, 0.0f }; 
             allVertices.push_back(v);
             allIndices.push_back((std::uint32_t)(allVertices.size() - 1));
             ++indexCount;
@@ -403,7 +400,6 @@ void BoxApp::BuildModelGeometry()
         mRenderItems.push_back(ri);
     }
 
-    // Сохраняем CPU копию Sponza для ray cast
     mCpuVertices.reserve(allVertices.size());
     for (const auto& v : allVertices)
         mCpuVertices.push_back(v.Pos);
@@ -483,12 +479,9 @@ void BoxApp::BuildModelGeometry()
 
 void BoxApp::ShootLightFromCamera()
 {
-    // Для орбитальной камеры из Update(): камера всегда смотрит в origin.
     XMVECTOR eye = XMLoadFloat3(&mEyePosW);
     XMVECTOR dir = XMVector3Normalize(XMVectorNegate(eye));
 
-    // Сдвигаем старт луча немного вперёд от камеры, чтобы не ловить почти нулевое
-    // пересечение с ближайшей геометрией около камеры.
     const float kStartOffset = 0.12f;
     XMVECTOR rayOrigin = eye + dir * kStartOffset;
 
@@ -496,9 +489,9 @@ void BoxApp::ShootLightFromCamera()
 
     float tMin = FLT_MAX;
     bool hit = false;
-    const float kMinHitDistance = 0.001f; // игнорируем только самопересечения
+    const float kMinHitDistance = 0.001f; 
 
-    // 2. CPU Raycast (только один раз при клике, чтобы найти точку попадания)
+    //CPU Raycast 
     uint32_t triCount = (uint32_t)mCpuIndices.size() / 3;
     for (uint32_t i = 0; i < triCount; ++i)
     {
@@ -513,9 +506,8 @@ void BoxApp::ShootLightFromCamera()
         }
     }
 
-    if (!hit) tMin = 60.0f; // Если никуда не попали, пусть летит далеко вперёд
+    if (!hit) tMin = 60.0f; 
 
-    // 3. Создаем "пулю" света
     ShotLight sl;
     XMStoreFloat3(&sl.Origin, rayOrigin);
     XMStoreFloat3(&sl.Direction, dir);
@@ -527,8 +519,8 @@ void BoxApp::ShootLightFromCamera()
         { 1.0f, 0.2f, 0.8f }, { 1.0f, 1.0f, 0.3f }, { 0.5f, 0.2f, 1.0f }
     };
     sl.Color = palette[mShotCount % 6];
-    sl.Range = 10.0f;    // Пока летит, радиус заметный
-    sl.TargetT = tMin;   // Запоминаем, где нужно остановиться
+    sl.Range = 10.0f;    
+    sl.TargetT = tMin;   
     sl.CurrentT = 0.0f;
     sl.IsFlying = true;
 
@@ -542,7 +534,6 @@ LRESULT BoxApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     if (msg == WM_KEYDOWN)
     {
-        // Бит 30 == 0 только при первом нажатии (без автоповтора клавиши).
         if (wParam == VK_SPACE && ((lParam & 0x40000000) == 0))
             mShootRequested = true;
         if (wParam == 'R')
@@ -569,7 +560,7 @@ void BoxApp::Update(const GameTimer& gt)
     float s = 1.0f;
     XMMATRIX sponzaWorld = XMMatrixScaling(s, s, s);
     XMStoreFloat4x4(&mWorld, sponzaWorld);
-    mSponzaWorld = mWorld; // Важно для Raycast!
+    mSponzaWorld = mWorld; 
 
     if (mShootRequested)
     {
@@ -578,22 +569,19 @@ void BoxApp::Update(const GameTimer& gt)
     }
 
     // 2. Обновляем полет света
-    const float kMarkerRadius = 0.12f;   // должен совпадать с scale маркера
-    const float kSurfaceBias = 0.03f;    // чуть отступаем от стены во избежание z-fighting
+    const float kMarkerRadius = 50.8f;   
+    const float kSurfaceBias = 0.03f;    
     for (auto& sl : mShotLights) {
         if (sl.IsFlying) {
             float dt = gt.DeltaTime();
             float stepDist = mLightSpeed * dt;
 
-            // Срабатываем немного раньше по радиусу маркера, чтобы пятно появлялось
-            // в момент визуального контакта маркера со стеной.
             float triggerT = sl.TargetT - kMarkerRadius;
             if (triggerT < 0.0f) triggerT = 0.0f;
             if (sl.CurrentT + stepDist >= triggerT) {
                 sl.IsFlying = false;
-                sl.Range = 28.0f; // При попадании делаем большой радиус
+                sl.Range = 28.0f; 
 
-                // Фиксируем позицию точно в точке столкновения (без перелёта)
                 XMVECTOR o = XMLoadFloat3(&sl.Origin);
                 XMVECTOR d = XMLoadFloat3(&sl.Direction);
                 float placeT = sl.TargetT - kSurfaceBias;
@@ -654,7 +642,6 @@ void BoxApp::Draw(const GameTimer& gt)
     mCommandList->IASetIndexBuffer(&mModelGeo->IndexBufferView());
     mCommandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    // Рисуем Sponza
     UINT geomCbIndex = 0;
     mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), geomConsts, geomCbIndex++);
     for (const auto& ri : mRenderItems)
@@ -669,7 +656,7 @@ void BoxApp::Draw(const GameTimer& gt)
             sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
     }
 
-    // Визуализируем выстрелянные источники маленькой звездой (маркер полёта/фиксации).
+    //маркер полёта
     for (const auto& sl : mShotLights)
     {
         XMMATRIX shotWorld =
@@ -704,7 +691,6 @@ void BoxApp::Draw(const GameTimer& gt)
 
     mRenderingSystem.EndGeometryPass(mCommandList.Get());
 
-    // Переводим depth в SRV для чтения в lighting pass
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         mDepthStencilBuffer.Get(),
         D3D12_RESOURCE_STATE_DEPTH_WRITE,
@@ -724,7 +710,6 @@ void BoxApp::Draw(const GameTimer& gt)
     mCommandList->ClearRenderTargetView(
         CurrentBackBufferView(), Colors::Black, 0, nullptr);
 
-    // Базовые источники света
     mRenderingSystem.ClearLights();
     mRenderingSystem.AddDirectionalLight(
         { 0.3f, -1.0f, 0.5f }, { 1.0f, 0.95f, 0.8f }, 1.0f);
@@ -736,8 +721,6 @@ void BoxApp::Draw(const GameTimer& gt)
         { 0.0f, 5.0f, 0.0f }, { 0.0f, -1.0f, 0.0f },
         { 1.0f, 1.0f, 0.8f }, 5.0f, 10.0f, 30.0f);
 
-    // Для lighting pass используем ту же конвенцию, что и в geometry pass:
-    // в HLSL mul(vector, matrix), поэтому матрицы передаём transposed.
 
     XMMATRIX invView = XMMatrixInverse(nullptr, view);
     XMMATRIX invProj = XMMatrixInverse(nullptr, proj);
@@ -748,9 +731,6 @@ void BoxApp::Draw(const GameTimer& gt)
     XMStoreFloat4x4(&iv, XMMatrixTranspose(invView));
     XMStoreFloat4x4(&ip, XMMatrixTranspose(invProj));
 
-    // Добавляем выстрелы с приоритетом:
-    // 1) летящие (самые новые), 2) затем стационарные (самые новые).
-    // Это убирает задержку, когда лимит lights съедают старые источники.
     const int kBaseLights = 4;
     int shotBudget = kMaxLights - kBaseLights;
     if (shotBudget < 0) shotBudget = 0;
@@ -777,7 +757,6 @@ void BoxApp::Draw(const GameTimer& gt)
         mCommandList.Get(), CurrentBackBufferView(), DepthStencilView(),
         mEyePosW, ivp, iv, ip, mDepthSrvGpuHandle);
 
-    // Возвращаем depth в рабочее состояние
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         mDepthStencilBuffer.Get(),
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,

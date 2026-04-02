@@ -103,8 +103,7 @@ float4 PS(VertexOut pin) : SV_Target
     float3 normal   = (dot(nTex, nTex) > 1e-6f) ? normalize(nTex) : float3(0.0f, 1.0f, 0.0f);
     float4 specData = gSpecular.Sample(gsamPoint, pin.TexC);
 
-    // Если текстура не загрузилась/слишком тёмная, даём нейтральный базовый цвет,
-    // чтобы освещение было видно на всей геометрии.
+
     if (max(albedo.r, max(albedo.g, albedo.b)) < 0.03f)
         albedo.rgb = float3(0.55f, 0.55f, 0.55f);
 

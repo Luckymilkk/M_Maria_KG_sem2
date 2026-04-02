@@ -136,7 +136,6 @@ void RenderingSystem::DoLightingPass(
     lightConsts.NumLights = (int)mLights.size();
     lightConsts.EyePosW = eyePos;
 
-    // Эти матрицы уже должны быть транспонированы в BoxApp::Draw
     lightConsts.InvViewProj = invViewProj;
     lightConsts.InvView = invView;
     lightConsts.InvProj = invProj;
@@ -184,10 +183,7 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
             serial->GetBufferSize(), IID_PPV_ARGS(&mGeometryRootSig)));
     }
 
-    // Lighting pass root signature
-    // Слот 0: CBV (b0) — константы освещения + InvViewProj
-    // Слот 1: SRV table t0..t2 — GBuffer (Albedo, Normal, Specular)
-    // Слот 2: SRV table t3     — Depth buffer
+
     {
         CD3DX12_DESCRIPTOR_RANGE gbufTable;
         gbufTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::NumRTs, 0); // t0,t1,t2
