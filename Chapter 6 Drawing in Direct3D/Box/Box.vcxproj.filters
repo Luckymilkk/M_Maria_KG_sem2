@@ -92,5 +92,6 @@
     <None Include="lighting.hlsl" />
     <None Include="Shaders\gbuffer.hlsl" />
     <None Include="Shaders\lighting.hlsl" />
+    <None Include="Shaders\tessellation.hlsl" />
   </ItemGroup>
 </Project>

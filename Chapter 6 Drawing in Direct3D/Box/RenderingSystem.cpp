@@ -32,10 +32,12 @@ void RenderingSystem::Init(
     mGeomCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(GeometryPassConstants));
     mGeomCB = std::make_unique<UploadBuffer<GeometryPassConstants>>(device, kMaxGeometryCBs, true);
     mLightCB = std::make_unique<UploadBuffer<LightingPassConstants>>(device, 1, true);
+    mTessCB = std::make_unique<UploadBuffer<TessellationConstants>>(device, kMaxTessCBs, true);
 
     BuildRootSignatures(device);
     BuildGeometryPassPSO(device, depthStencilFormat);
     BuildLightingPassPSO(device, backBufferFormat, depthStencilFormat);
+    BuildTessellationPSO(device, depthStencilFormat);
 
     BuildFullscreenQuad(device, cmdList);
 }
@@ -90,6 +92,9 @@ void RenderingSystem::AddSpotLight(XMFLOAT3 position, XMFLOAT3 direction,
 }
 
 
+// ---------------------------------------------------------------------------
+//  Geometry pass (без тесселяции)
+// ---------------------------------------------------------------------------
 void RenderingSystem::BeginGeometryPass(
     ID3D12GraphicsCommandList* cmdList,
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle)
@@ -113,8 +118,7 @@ void RenderingSystem::SetGeometryPassConstants(
     const GeometryPassConstants& constants,
     UINT cbIndex)
 {
-    if (cbIndex >= kMaxGeometryCBs)
-        cbIndex = kMaxGeometryCBs - 1;
+    if (cbIndex >= kMaxGeometryCBs) cbIndex = kMaxGeometryCBs - 1;
 
     mGeomCB->CopyData((int)cbIndex, constants);
     D3D12_GPU_VIRTUAL_ADDRESS addr =
@@ -122,6 +126,57 @@ void RenderingSystem::SetGeometryPassConstants(
     cmdList->SetGraphicsRootConstantBufferView(0, addr);
 }
 
+// ---------------------------------------------------------------------------
+//  Tessellation pass
+// ---------------------------------------------------------------------------
+void RenderingSystem::BeginTessellationPass(
+    ID3D12GraphicsCommandList* cmdList,
+    D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle)
+{
+    // GBuffer уже должен быть в состоянии RenderTarget (вызывается после BeginGeometryPass
+    // или самостоятельно — тогда переход уже произошёл).
+    // Просто привязываем G-buffer и устанавливаем тесселяционный PSO.
+    mGBuffer.BindAsRenderTargets(cmdList, dsvHandle);
+
+    cmdList->SetPipelineState(mTessPSO.Get());
+    cmdList->SetGraphicsRootSignature(mTessRootSig.Get());
+
+    // Примитивная топология для тесселяции треугольных патчей
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+}
+
+void RenderingSystem::SetTessellationConstants(
+    ID3D12GraphicsCommandList* cmdList,
+    const GeometryPassConstants& geomConsts,
+    UINT geomCbIndex,
+    const TessellationConstants& tessConsts,
+    UINT tessIndex)
+{
+    if (geomCbIndex >= kMaxGeometryCBs) geomCbIndex = kMaxGeometryCBs - 1;
+    if (tessIndex >= kMaxTessCBs)     tessIndex = kMaxTessCBs - 1;
+
+    mGeomCB->CopyData((int)geomCbIndex, geomConsts);
+    mTessCB->CopyData((int)tessIndex, tessConsts);
+
+    UINT geomStride = d3dUtil::CalcConstantBufferByteSize(sizeof(GeometryPassConstants));
+    UINT tessStride = d3dUtil::CalcConstantBufferByteSize(sizeof(TessellationConstants));
+
+    D3D12_GPU_VIRTUAL_ADDRESS geomAddr =
+        mGeomCB->Resource()->GetGPUVirtualAddress() + (UINT64)geomCbIndex * geomStride;
+    D3D12_GPU_VIRTUAL_ADDRESS tessAddr =
+        mTessCB->Resource()->GetGPUVirtualAddress() + (UINT64)tessIndex * tessStride;
+
+    // Слот 0: GeometryPassConstants (b0)
+    cmdList->SetGraphicsRootConstantBufferView(0, geomAddr);
+    // Слот 1: TessellationConstants (b1)
+    cmdList->SetGraphicsRootConstantBufferView(1, tessAddr);
+    // Слот 2: таблица текстур (diffuse t0, normal t1, displacement t2) — устанавливает вызывающий код
+}
+
+
+// ---------------------------------------------------------------------------
+//  Lighting pass
+// ---------------------------------------------------------------------------
 void RenderingSystem::DoLightingPass(
     ID3D12GraphicsCommandList* cmdList,
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle,
@@ -135,25 +190,19 @@ void RenderingSystem::DoLightingPass(
     LightingPassConstants lightConsts = {};
     lightConsts.NumLights = (int)mLights.size();
     lightConsts.EyePosW = eyePos;
-
     lightConsts.InvViewProj = invViewProj;
     lightConsts.InvView = invView;
     lightConsts.InvProj = invProj;
-
     for (int i = 0; i < (int)mLights.size(); ++i)
         lightConsts.Lights[i] = mLights[i];
 
     mLightCB->CopyData(0, lightConsts);
 
     cmdList->OMSetRenderTargets(1, &rtvHandle, true, &dsvHandle);
-
     cmdList->SetPipelineState(mLightingPSO.Get());
     cmdList->SetGraphicsRootSignature(mLightingRootSig.Get());
-
     cmdList->SetGraphicsRootConstantBufferView(0, mLightCB->Resource()->GetGPUVirtualAddress());
-    // Слот 1: таблица G-buffer (t0=Albedo, t1=Normal, t2=Specular)
     cmdList->SetGraphicsRootDescriptorTable(1, mGBuffer.GetSRVTable());
-    // Слот 2: depth buffer SRV (t3)
     cmdList->SetGraphicsRootDescriptorTable(2, depthSrvHandle);
 
     cmdList->IASetVertexBuffers(0, 1, &mQuadVBView);
@@ -162,12 +211,16 @@ void RenderingSystem::DoLightingPass(
 }
 
 
+// ---------------------------------------------------------------------------
+//  Root signatures
+// ---------------------------------------------------------------------------
 void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
 {
-    // Geometry pass root signature
+    // --- Geometry pass (без тесселяции): только diffuse (t0).
+    // Карта нормалей для задания — в tessellation.hlsl (там три SRV подряд).
     {
         CD3DX12_DESCRIPTOR_RANGE texTable;
-        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); // t0
 
         CD3DX12_ROOT_PARAMETER params[2];
         params[0].InitAsConstantBufferView(0);
@@ -183,13 +236,13 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
             serial->GetBufferSize(), IID_PPV_ARGS(&mGeometryRootSig)));
     }
 
-
+    // --- Lighting pass ---
     {
         CD3DX12_DESCRIPTOR_RANGE gbufTable;
-        gbufTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::NumRTs, 0); // t0,t1,t2
+        gbufTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::NumRTs, 0);
 
         CD3DX12_DESCRIPTOR_RANGE depthTable;
-        depthTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, GBuffer::NumRTs); // t3
+        depthTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, GBuffer::NumRTs);
 
         CD3DX12_ROOT_PARAMETER params[3];
         params[0].InitAsConstantBufferView(0);
@@ -205,17 +258,53 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
         ThrowIfFailed(device->CreateRootSignature(0, serial->GetBufferPointer(),
             serial->GetBufferSize(), IID_PPV_ARGS(&mLightingRootSig)));
     }
+
+    // --- Tessellation pass ---
+    // Слот 0: CBV b0 (GeometryPassConstants)
+    // Слот 1: CBV b1 (TessellationConstants)
+    // Слот 2: таблица SRV — diffuse(t0), normal(t1), displacement(t2)
+    {
+        CD3DX12_DESCRIPTOR_RANGE texTable;
+        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0); // t0..t2
+
+        CD3DX12_ROOT_PARAMETER params[3];
+        params[0].InitAsConstantBufferView(0);                              // b0 GeomCB
+        params[1].InitAsConstantBufferView(1);                              // b1 TessCB
+        params[2].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_ALL);
+
+        // CLAMP убирает «точки» на швах UV при сильной тесселяции; LINEAR — без лишнего mip-шума.
+        CD3DX12_STATIC_SAMPLER_DESC tessSampler(
+            0,
+            D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+            D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            0.0f,
+            1);
+        CD3DX12_ROOT_SIGNATURE_DESC desc(3, params, 1, &tessSampler,
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+        ComPtr<ID3DBlob> serial, err;
+        ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serial, &err));
+        ThrowIfFailed(device->CreateRootSignature(0, serial->GetBufferPointer(),
+            serial->GetBufferSize(), IID_PPV_ARGS(&mTessRootSig)));
+    }
 }
 
+// ---------------------------------------------------------------------------
+//  Geometry PSO (без тесселяции)
+// ---------------------------------------------------------------------------
 void RenderingSystem::BuildGeometryPassPSO(ID3D12Device* device, DXGI_FORMAT depthFmt)
 {
     mGeomVS = d3dUtil::CompileShader(L"Shaders\\gbuffer.hlsl", nullptr, "VS", "vs_5_1");
     mGeomPS = d3dUtil::CompileShader(L"Shaders\\gbuffer.hlsl", nullptr, "PS", "ps_5_1");
 
+    // Добавляем TANGENT в input layout
     std::vector<D3D12_INPUT_ELEMENT_DESC> inputLayout = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TANGENT",  0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
@@ -229,17 +318,18 @@ void RenderingSystem::BuildGeometryPassPSO(ID3D12Device* device, DXGI_FORMAT dep
     psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     psoDesc.SampleMask = UINT_MAX;
     psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-
     psoDesc.NumRenderTargets = GBuffer::NumRTs;
     for (int i = 0; i < GBuffer::NumRTs; ++i)
         psoDesc.RTVFormats[i] = GBuffer::GetFormat(i);
-
     psoDesc.SampleDesc.Count = 1;
     psoDesc.DSVFormat = depthFmt;
 
     ThrowIfFailed(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mGeometryPSO)));
 }
 
+// ---------------------------------------------------------------------------
+//  Lighting PSO
+// ---------------------------------------------------------------------------
 void RenderingSystem::BuildLightingPassPSO(ID3D12Device* device,
     DXGI_FORMAT backBufferFmt, DXGI_FORMAT depthFmt)
 {
@@ -247,7 +337,7 @@ void RenderingSystem::BuildLightingPassPSO(ID3D12Device* device,
     mLightPS = d3dUtil::CompileShader(L"Shaders\\lighting.hlsl", nullptr, "PS", "ps_5_1");
 
     std::vector<D3D12_INPUT_ELEMENT_DESC> inputLayout = {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
 
@@ -275,6 +365,53 @@ void RenderingSystem::BuildLightingPassPSO(ID3D12Device* device,
     ThrowIfFailed(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mLightingPSO)));
 }
 
+// ---------------------------------------------------------------------------
+//  Tessellation PSO  (VS + HS + DS + PS)
+// ---------------------------------------------------------------------------
+void RenderingSystem::BuildTessellationPSO(ID3D12Device* device, DXGI_FORMAT depthFmt)
+{
+    mTessVS = d3dUtil::CompileShader(L"Shaders\\tessellation.hlsl", nullptr, "VS", "vs_5_1");
+    mTessHS = d3dUtil::CompileShader(L"Shaders\\tessellation.hlsl", nullptr, "HS", "hs_5_1");
+    mTessDS = d3dUtil::CompileShader(L"Shaders\\tessellation.hlsl", nullptr, "DS", "ds_5_1");
+    mTessPS = d3dUtil::CompileShader(L"Shaders\\tessellation.hlsl", nullptr, "PS", "ps_5_1");
+
+    // Тот же layout, что и для обычной геометрии (+ TANGENT)
+    std::vector<D3D12_INPUT_ELEMENT_DESC> inputLayout = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TANGENT",  0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    };
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+    psoDesc.InputLayout = { inputLayout.data(), (UINT)inputLayout.size() };
+    psoDesc.pRootSignature = mTessRootSig.Get();
+    psoDesc.VS = { mTessVS->GetBufferPointer(), mTessVS->GetBufferSize() };
+    psoDesc.HS = { mTessHS->GetBufferPointer(), mTessHS->GetBufferSize() };
+    psoDesc.DS = { mTessDS->GetBufferPointer(), mTessDS->GetBufferSize() };
+    psoDesc.PS = { mTessPS->GetBufferPointer(), mTessPS->GetBufferSize() };
+
+    psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    psoDesc.SampleMask = UINT_MAX;
+
+    // Для тесселяции обязательно PATCH
+    psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+
+    psoDesc.NumRenderTargets = GBuffer::NumRTs;
+    for (int i = 0; i < GBuffer::NumRTs; ++i)
+        psoDesc.RTVFormats[i] = GBuffer::GetFormat(i);
+    psoDesc.SampleDesc.Count = 1;
+    psoDesc.DSVFormat = depthFmt;
+
+    ThrowIfFailed(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mTessPSO)));
+}
+
+// ---------------------------------------------------------------------------
+//  Fullscreen quad
+// ---------------------------------------------------------------------------
 void RenderingSystem::BuildFullscreenQuad(ID3D12Device* device,
     ID3D12GraphicsCommandList* cmdList)
 {

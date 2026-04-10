@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "Common/d3dUtil.h"
 #include "Common/d3dx12.h"
 #include "Common/UploadBuffer.h"
@@ -30,8 +30,21 @@ struct GeometryPassConstants
     DirectX::XMFLOAT4X4 WorldViewProj = MathHelper::Identity4x4();
     DirectX::XMFLOAT4X4 World = MathHelper::Identity4x4();
     DirectX::XMFLOAT4X4 WorldInvTranspose = MathHelper::Identity4x4();
+
     float       Time = 0.0f;
     DirectX::XMFLOAT3    pad = {};
+};
+
+// Константы для тесселяционного прохода (cbuffer b1 в tessellation.hlsl)
+struct TessellationConstants
+{
+    DirectX::XMFLOAT3 EyePosW = { 0,0,0 };
+    float             DisplaceScale = 0.05f;  // сила смещения
+
+    float MinTessDist = 2.0f;   // расстояние "вблизи"  → MaxTess
+    float MaxTessDist = 50.0f;  // расстояние "вдали"   → MinTess
+    float MinTess = 1.0f;   // TF когда объект далеко
+    float MaxTess = 16.0f;  // TF когда объект близко
 };
 
 
@@ -46,10 +59,10 @@ struct LightingPassConstants
     float               pad2;
     DirectX::XMFLOAT3   EyePosW;
     float               pad3;
-    
+
     DirectX::XMFLOAT4X4 InvViewProj = MathHelper::Identity4x4();
-    DirectX::XMFLOAT4X4 InvView;      
-    DirectX::XMFLOAT4X4 InvProj;      
+    DirectX::XMFLOAT4X4 InvView;
+    DirectX::XMFLOAT4X4 InvProj;
 };
 
 class RenderingSystem
@@ -110,9 +123,30 @@ public:
         const GeometryPassConstants& constants,
         UINT cbIndex);
 
+    // ---- Tessellation pass ----
+
+    // Начало геометрического прохода с тесселяцией.
+    // Вызывать вместо BeginGeometryPass для объектов с тесселяцией.
+    void BeginTessellationPass(
+        ID3D12GraphicsCommandList* cmdList,
+        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle);
+
+    // Устанавливает константы тесселяции (cbuffer b1) и геометрии (cbuffer b0).
+    // tessIndex — слот в буфере тесселяции (обычно 0, если объект один).
+    void SetTessellationConstants(
+        ID3D12GraphicsCommandList* cmdList,
+        const GeometryPassConstants& geomConsts,
+        UINT geomCbIndex,
+        const TessellationConstants& tessConsts,
+        UINT tessIndex = 0);
+
+    // ---- Root signatures / PSOs (геттеры) ----
     ID3D12RootSignature* GetGeometryRootSignature() const { return mGeometryRootSig.Get(); }
     ID3D12PipelineState* GetGeometryPSO()           const { return mGeometryPSO.Get(); }
     ID3D12Resource* GetGeometryCBResource()    const { return mGeomCB->Resource(); }
+
+    ID3D12RootSignature* GetTessellationRootSignature() const { return mTessRootSig.Get(); }
+    ID3D12PipelineState* GetTessellationPSO()           const { return mTessPSO.Get(); }
 
     void DoLightingPass(ID3D12GraphicsCommandList* cmdList,
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle,
@@ -124,32 +158,41 @@ public:
         D3D12_GPU_DESCRIPTOR_HANDLE depthSrvHandle);
 
 private:
-    void BuildGeometryPassPSO(ID3D12Device* device,
+    void BuildGeometryPassPSO(ID3D12Device* device, DXGI_FORMAT depthStencilFormat);
+    void BuildLightingPassPSO(ID3D12Device* device, DXGI_FORMAT backBufferFormat,
         DXGI_FORMAT depthStencilFormat);
-    void BuildLightingPassPSO(ID3D12Device* device,
-        DXGI_FORMAT backBufferFormat,
-        DXGI_FORMAT depthStencilFormat);
+    void BuildTessellationPSO(ID3D12Device* device, DXGI_FORMAT depthStencilFormat);
     void BuildRootSignatures(ID3D12Device* device);
-    void BuildFullscreenQuad(ID3D12Device* device,
-        ID3D12GraphicsCommandList* cmdList);
+    void BuildFullscreenQuad(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList);
 
     GBuffer mGBuffer;
 
+    // Root signatures
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mGeometryRootSig;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mLightingRootSig;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> mTessRootSig;     // для тесселяционного прохода
+
+    // Pipeline states
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometryPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mLightingPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mTessPSO;         // с HS + DS
 
+    // Shaders
     Microsoft::WRL::ComPtr<ID3DBlob> mGeomVS, mGeomPS;
     Microsoft::WRL::ComPtr<ID3DBlob> mLightVS, mLightPS;
+    Microsoft::WRL::ComPtr<ID3DBlob> mTessVS, mTessHS, mTessDS, mTessPS;
 
+    // Constant buffers
     std::unique_ptr<UploadBuffer<GeometryPassConstants>>  mGeomCB;
     std::unique_ptr<UploadBuffer<LightingPassConstants>>  mLightCB;
+    std::unique_ptr<UploadBuffer<TessellationConstants>>  mTessCB;
     UINT mGeomCBByteSize = 0;
     static const UINT kMaxGeometryCBs = 512;
+    static const UINT kMaxTessCBs = 512;
 
     std::vector<LightData> mLights;
 
+    // Fullscreen quad
     Microsoft::WRL::ComPtr<ID3D12Resource> mQuadVB;
     Microsoft::WRL::ComPtr<ID3D12Resource> mQuadVBUploader;
     D3D12_VERTEX_BUFFER_VIEW               mQuadVBView = {};
@@ -160,3 +203,4 @@ private:
     DXGI_FORMAT mBackBufferFormat = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT mDepthStencilFormat = DXGI_FORMAT_UNKNOWN;
 };
+
