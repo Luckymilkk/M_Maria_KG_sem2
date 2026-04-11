@@ -133,15 +133,13 @@ void RenderingSystem::BeginTessellationPass(
     ID3D12GraphicsCommandList* cmdList,
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle)
 {
-    // GBuffer уже должен быть в состоянии RenderTarget (вызывается после BeginGeometryPass
-    // или самостоятельно — тогда переход уже произошёл).
-    // Просто привязываем G-buffer и устанавливаем тесселяционный PSO.
+ 
     mGBuffer.BindAsRenderTargets(cmdList, dsvHandle);
 
     cmdList->SetPipelineState(mTessPSO.Get());
     cmdList->SetGraphicsRootSignature(mTessRootSig.Get());
 
-    // Примитивная топология для тесселяции треугольных патчей
+  
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
 }
 
@@ -259,10 +257,7 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
             serial->GetBufferSize(), IID_PPV_ARGS(&mLightingRootSig)));
     }
 
-    // --- Tessellation pass ---
-    // Слот 0: CBV b0 (GeometryPassConstants)
-    // Слот 1: CBV b1 (TessellationConstants)
-    // Слот 2: таблица SRV — diffuse(t0), normal(t1), displacement(t2)
+
     {
         CD3DX12_DESCRIPTOR_RANGE texTable;
         texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0); // t0..t2
@@ -365,9 +360,7 @@ void RenderingSystem::BuildLightingPassPSO(ID3D12Device* device,
     ThrowIfFailed(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mLightingPSO)));
 }
 
-// ---------------------------------------------------------------------------
-//  Tessellation PSO  (VS + HS + DS + PS)
-// ---------------------------------------------------------------------------
+
 void RenderingSystem::BuildTessellationPSO(ID3D12Device* device, DXGI_FORMAT depthFmt)
 {
     mTessVS = d3dUtil::CompileShader(L"Shaders\\tessellation.hlsl", nullptr, "VS", "vs_5_1");
@@ -392,6 +385,7 @@ void RenderingSystem::BuildTessellationPSO(ID3D12Device* device, DXGI_FORMAT dep
     psoDesc.PS = { mTessPS->GetBufferPointer(), mTessPS->GetBufferSize() };
 
     psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
     psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
     psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
@@ -409,9 +403,6 @@ void RenderingSystem::BuildTessellationPSO(ID3D12Device* device, DXGI_FORMAT dep
     ThrowIfFailed(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mTessPSO)));
 }
 
-// ---------------------------------------------------------------------------
-//  Fullscreen quad
-// ---------------------------------------------------------------------------
 void RenderingSystem::BuildFullscreenQuad(ID3D12Device* device,
     ID3D12GraphicsCommandList* cmdList)
 {

@@ -67,7 +67,7 @@ float CalcTessFactor(float3 midPointW)
 {
     float d = distance(midPointW, gEyePosW);
     float t = saturate((d - gMinTessDist) / max(gMaxTessDist - gMinTessDist, 0.001f));
-    return lerp(gMaxTess, gMinTess, t);
+    return lerp(16.0f, 1.0f, t);
 }
 
 HS_TESS_FACTORS ConstantsHS(InputPatch<VS_OUT, 3> patch, uint PatchID : SV_PrimitiveID)
@@ -86,10 +86,10 @@ HS_TESS_FACTORS ConstantsHS(InputPatch<VS_OUT, 3> patch, uint PatchID : SV_Primi
 }
 
 [domain("tri")]
-[partitioning("fractional_odd")]
-[outputtopology("triangle_cw")]
-[outputcontrolpoints(3)]
-[patchconstantfunc("ConstantsHS")]
+[partitioning("fractional_odd")] // плавная тесселяция
+[outputtopology("triangle_cw")] // порядок вершин триуг
+[outputcontrolpoints(3)] // 3 запуска по колич верш триуг
+[patchconstantfunc("ConstantsHS")] // коэф тессел
 [maxtessfactor(64.0)]
 HS_OUT HS(InputPatch<VS_OUT, 3> patch, uint uCPID : SV_OutputControlPointID)
 {
@@ -123,7 +123,6 @@ DS_OUT DS(HS_TESS_FACTORS input, float3 bary : SV_DomainLocation, const OutputPa
 
     normalW = normalize(normalW);
 
-    // ВАЖНО: Убрали saturate(texC), чтобы работала плиточная текстура (tiling)
     float displacement = gDisplaceMap.SampleLevel(gsamLinear, texC, 0).r;
     
     // Смещение по карте высот
@@ -149,7 +148,6 @@ PSOutput PS(DS_OUT pin)
 {
     PSOutput output;
 
-    // 1. Диффузный цвет
     float4 albedo = gDiffuseMap.Sample(gsamLinear, pin.TexC);
     output.Albedo = albedo;
 
@@ -165,11 +163,7 @@ PSOutput PS(DS_OUT pin)
     // Переводим в мировое пространство
     float3 worldNormal = normalize(mul(normalTan, TBN));
 
-    // ВАЖНО: Если ваш G-буфер (Normal) имеет формат R8G8B8A8_UNORM, 
-    // необходимо упаковать нормаль в диапазон [0, 1]:
-    // output.Normal = float4(worldNormal * 0.5f + 0.5f, 1.0f);
-    
-    // Если же формат FLOAT (например, R16G16B16A16_FLOAT), оставляем как есть:
+
     output.Normal = float4(worldNormal, 0.0f);
 
     output.Specular = float4(0.3f, 0.3f, 0.3f, 1.0f); 

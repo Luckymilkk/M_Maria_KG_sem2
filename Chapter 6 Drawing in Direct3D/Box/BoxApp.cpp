@@ -148,14 +148,9 @@ private:
     bool         mShootRequested = false;
     static const size_t mMaxShotLights = 48;
 
-    // ============================================================
-    // ИЗМЕНЕНИЕ 5 (доп): индексы тесселируемого объекта в heap'е
-    // Здесь будем хранить индекс первого SRV тесселируемого меша
-    // (diffuse=idx, normal=idx+1, displacement=idx+2 — подряд!)
-    // ============================================================
+
     int mTessObjBaseSrvIndex = -1; // заполняется в BuildDescriptorHeaps
 
-    // Параметры тесселяции (настраиваются в коде или клавишами)
     float mTessDisplaceScale = 0.04f; // меньше — меньше шума и самопересечений
     float mTessMinTessDist = 2.0f;
     float mTessMaxTessDist = 40.0f;
