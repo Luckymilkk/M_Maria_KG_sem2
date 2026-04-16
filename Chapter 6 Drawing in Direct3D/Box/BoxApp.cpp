@@ -18,15 +18,13 @@ using Microsoft::WRL::ComPtr;
 using namespace DirectX;
 using namespace DirectX::PackedVector;
 
-// ============================================================
-// ИЗМЕНЕНИЕ 1: добавили поле Tangent в структуру Vertex
-// ============================================================
+
 struct Vertex
 {
     XMFLOAT3 Pos;
     XMFLOAT3 Normal;
     XMFLOAT2 TexC;
-    XMFLOAT3 Tangent; // <-- НОВОЕ ПОЛЕ
+    XMFLOAT3 Tangent; 
 };
 
 struct MyTexture
@@ -37,18 +35,15 @@ struct MyTexture
     ComPtr<ID3D12Resource> UploadHeap = nullptr;
 };
 
-// ============================================================
-// ИЗМЕНЕНИЕ 5: добавили поля NormalSrvIndex, DisplaceSrvIndex,
-// UseTess в RenderItem
-// ============================================================
+
 struct RenderItem
 {
     std::string SubmeshName;
     int         TexSrvIndex;
-    int         NormalSrvIndex = -1; // <-- НОВОЕ: индекс normal map в mObjectSrvHeap
-    int         DisplaceSrvIndex = -1; // <-- НОВОЕ: индекс displacement map
+    int         NormalSrvIndex = -1; 
+    int         DisplaceSrvIndex = -1; 
     bool        IsStar = false;
-    bool        UseTess = false;       // <-- НОВОЕ: рисовать с тесселяцией?
+    bool        UseTess = false;      
 };
 
 static bool RayTriangleIntersect(
@@ -149,19 +144,19 @@ private:
     static const size_t mMaxShotLights = 48;
 
 
-    int mTessObjBaseSrvIndex = -1; // заполняется в BuildDescriptorHeaps
+    int mTessObjBaseSrvIndex = -1; 
 
-    float mTessDisplaceScale = 0.04f; // меньше — меньше шума и самопересечений
+    float mTessDisplaceScale = 0.04f; 
     float mTessMinTessDist = 2.0f;
     float mTessMaxTessDist = 40.0f;
     float mTessMinTess = 1.0f;
     float mTessMaxTess = 16.0f;
-    float mTessWorldScale = 1.22f;   // общий масштаб тесселируемого объекта
-    // Смещение после масштаба: чуть ниже центра и дальше по +Z от камеры по умолчанию
+    float mTessWorldScale = 1.22f;   
+  
     XMFLOAT3 mTessWorldOffset = { 0.0f, 0.12f, 1.75f };
 };
 
-// ============================================================
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance,
     PSTR cmdLine, int showCmd)
 {
@@ -200,7 +195,6 @@ bool BoxApp::Initialize()
     return true;
 }
 
-// ============================================================
 void BoxApp::BuildDepthSRV()
 {
     UINT srvSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -219,7 +213,6 @@ void BoxApp::BuildDepthSRV()
     md3dDevice->CreateShaderResourceView(mDepthStencilBuffer.Get(), &srvDesc, cpuHandle);
 }
 
-// ============================================================
 void BoxApp::LoadTextures()
 {
     tinyobj::ObjReader       reader;
@@ -276,18 +269,13 @@ void BoxApp::LoadTextures()
     addTexDDS(L"models/source/725b3a4da0ef_Tiny_green_starw__3_roughness.dds", "star_roughness");
     addTexDDS(L"models/source/725b3a4da0ef_Tiny_green_starw__3_metallic.dds", "star_metallic");
 
-    // ============================================================
-    // ИЗМЕНЕНИЕ 5: загружаем три текстуры для тесселируемого объекта.
-    // Они должны лежать ПОДРЯД в mAllTextures — тогда в heap'е
-    // их SRV тоже окажутся подряд (diffuse→normal→displacement).
-    // Замени пути на свои реальные файлы!
-    // ============================================================
+
     addTexDDS(L"models/source/convertio.in_albedo.dds", "tess_diffuse");     // t0
     addTexDDS(L"models/source/convertio.in_normal.dds", "tess_normal");      // t1
     addTexDDS(L"models/source/convertio.in_displacement.dds", "tess_displacement"); // t2
 }
 
-// ============================================================
+
 void BoxApp::BuildDescriptorHeaps()
 {
     LoadTextures();
@@ -323,16 +311,11 @@ void BoxApp::BuildDescriptorHeaps()
     UINT srvSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     CD3DX12_CPU_DESCRIPTOR_HANDLE hDesc(mObjectSrvHeap->GetCPUDescriptorHandleForHeapStart());
 
-    // ============================================================
-    // ИЗМЕНЕНИЕ 6: запоминаем индекс начала тесселируемых текстур.
-    // Создаём SRV для всех текстур подряд, попутно отслеживая
-    // позицию "tess_diffuse" — это и есть mTessObjBaseSrvIndex.
-    // ============================================================
+
     for (int i = 0; i < (int)mAllTextures.size(); ++i)
     {
         auto& tex = mAllTextures[i];
 
-        // Запоминаем позицию первой тесселируемой текстуры
         if (tex->Name == "tess_diffuse")
             mTessObjBaseSrvIndex = i;
 
@@ -346,9 +329,7 @@ void BoxApp::BuildDescriptorHeaps()
     }
 }
 
-// ============================================================
-// ИЗМЕНЕНИЕ 2: вычисление tangent при загрузке геометрии
-// ============================================================
+
 void BoxApp::BuildModelGeometry()
 {
     tinyobj::ObjReader       reader;
@@ -379,22 +360,18 @@ void BoxApp::BuildModelGeometry()
         if (!shape.mesh.material_ids.empty())
             matId = shape.mesh.material_ids[0];
 
-        // ----------------------------------------------------------
-        // Читаем вершины треугольника за треугольником.
-        // После заполнения pos/normal/texC вычисляем tangent
-        // по формуле из презентации (слайд 9).
-        // ----------------------------------------------------------
+
         const auto& meshIndices = shape.mesh.indices;
         size_t triCount = meshIndices.size() / 3;
 
         for (size_t tri = 0; tri < triCount; ++tri)
         {
-            // Три индекса текущего треугольника
+           
             const auto& i0 = meshIndices[tri * 3 + 0];
             const auto& i1 = meshIndices[tri * 3 + 1];
             const auto& i2 = meshIndices[tri * 3 + 2];
 
-            // Позиции вершин
+          
             XMFLOAT3 pos0 = { attrib.vertices[3 * i0.vertex_index + 0],
                                attrib.vertices[3 * i0.vertex_index + 1],
                                attrib.vertices[3 * i0.vertex_index + 2] };
@@ -405,7 +382,7 @@ void BoxApp::BuildModelGeometry()
                                attrib.vertices[3 * i2.vertex_index + 1],
                                attrib.vertices[3 * i2.vertex_index + 2] };
 
-            // UV-координаты
+          
             XMFLOAT2 uv0 = (i0.texcoord_index >= 0) ?
                 XMFLOAT2{ attrib.texcoords[2 * i0.texcoord_index + 0],
                           1.0f - attrib.texcoords[2 * i0.texcoord_index + 1] } :
@@ -419,15 +396,7 @@ void BoxApp::BuildModelGeometry()
                           1.0f - attrib.texcoords[2 * i2.texcoord_index + 1] } :
                 XMFLOAT2{ 0,0 };
 
-            // --------------------------------------------------------
-            // Вычисляем tangent по формуле из слайда 9 презентации:
-            //   edge1 = pos1 - pos0
-            //   edge2 = pos2 - pos0
-            //   deltaUV1 = uv1 - uv0
-            //   deltaUV2 = uv2 - uv0
-            //   f = 1 / (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y)
-            //   tangent = f * (deltaUV2.y * edge1 - deltaUV1.y * edge2)
-            // --------------------------------------------------------
+
             XMFLOAT3 edge1 = { pos1.x - pos0.x, pos1.y - pos0.y, pos1.z - pos0.z };
             XMFLOAT3 edge2 = { pos2.x - pos0.x, pos2.y - pos0.y, pos2.z - pos0.z };
             XMFLOAT2 deltaUV1 = { uv1.x - uv0.x, uv1.y - uv0.y };
@@ -441,7 +410,7 @@ void BoxApp::BuildModelGeometry()
             tangent.y = f * (deltaUV2.y * edge1.y - deltaUV1.y * edge2.y);
             tangent.z = f * (deltaUV2.y * edge1.z - deltaUV1.y * edge2.z);
 
-            // Нормализуем (если вырожденный треугольник — используем заглушку)
+    
             XMVECTOR T = XMLoadFloat3(&tangent);
             float len = XMVectorGetX(XMVector3Length(T));
             if (len > 1e-6f)
@@ -449,7 +418,7 @@ void BoxApp::BuildModelGeometry()
             else
                 tangent = { 1.0f, 0.0f, 0.0f };
 
-            // Записываем три вершины треугольника с одинаковым tangent
+
             auto makeVert = [&](const tinyobj::index_t& idx,
                 const XMFLOAT3& pos,
                 const XMFLOAT2& uv) -> Vertex
@@ -462,7 +431,7 @@ void BoxApp::BuildModelGeometry()
                                    attrib.normals[3 * idx.normal_index + 2] } :
                         XMFLOAT3{ 0.0f, 1.0f, 0.0f };
                     v.TexC = uv;
-                    v.Tangent = tangent; // одинаковый для всех трёх вершин патча
+                    v.Tangent = tangent;
                     return v;
                 };
 
@@ -481,7 +450,7 @@ void BoxApp::BuildModelGeometry()
         submesh.BaseVertexLocation = 0;
         mModelGeo->DrawArgs[shape.name] = submesh;
 
-        // Ищем diffuse-текстуру для этого сабмеша
+ 
         int texIndex = 0;
         if (matId >= 0 && matId < (int)materials.size())
         {
@@ -502,19 +471,16 @@ void BoxApp::BuildModelGeometry()
         ri.SubmeshName = shape.name;
         ri.TexSrvIndex = texIndex;
         ri.IsStar = false;
-        ri.UseTess = false; // Sponza рисуется без тесселяции
+        ri.UseTess = false; 
         mRenderItems.push_back(ri);
     }
 
-    // Сохраняем CPU-копию вершин для рейкаста
+ 
     mCpuVertices.reserve(allVertices.size());
     for (const auto& v : allVertices)
         mCpuVertices.push_back(v.Pos);
     mCpuIndices = allIndices;
 
-    // ----------------------------------------------------------
-    // Звезда (без изменений, tangent = {1,0,0} по умолчанию)
-    // ----------------------------------------------------------
     {
         tinyobj::ObjReader reader2;
         tinyobj::ObjReaderConfig config2;
@@ -566,11 +532,7 @@ void BoxApp::BuildModelGeometry()
         mRenderItems.push_back(ri);
     }
 
-    // ----------------------------------------------------------
-    // ИЗМЕНЕНИЕ 2 (доп): добавляем тесселируемый меш.
-    // Загружаем его так же, как Sponza — с вычислением tangent.
-    // Замени путь на свой OBJ!
-    // ----------------------------------------------------------
+
     {
         tinyobj::ObjReader reader3;
         tinyobj::ObjReaderConfig config3;
@@ -615,7 +577,7 @@ void BoxApp::BuildModelGeometry()
                         XMFLOAT2{ attrib3.texcoords[2 * j2.texcoord_index + 0],
                                  1.0f - attrib3.texcoords[2 * j2.texcoord_index + 1] } : XMFLOAT2{ 0,0 };
 
-                    // Tangent (та же формула)
+                 
                     XMFLOAT3 e1 = { p1.x - p0.x,p1.y - p0.y,p1.z - p0.z };
                     XMFLOAT3 e2 = { p2.x - p0.x,p2.y - p0.y,p2.z - p0.z };
                     XMFLOAT2 d1 = { u1.x - u0.x,u1.y - u0.y };
@@ -658,10 +620,6 @@ void BoxApp::BuildModelGeometry()
             submesh.BaseVertexLocation = 0;
             mModelGeo->DrawArgs["tessMesh"] = submesh;
 
-            // -------------------------------------------------------
-            // ИЗМЕНЕНИЕ 5: RenderItem с флагом UseTess и индексами
-            // трёх текстур (они подряд в heap'е: base, base+1, base+2)
-            // -------------------------------------------------------
             RenderItem ri;
             ri.SubmeshName = "tessMesh";
             ri.UseTess = true;
@@ -673,7 +631,7 @@ void BoxApp::BuildModelGeometry()
         }
         else
         {
-            // Резерв: плоская сетка (если нет models/tess/myMesh.obj — тесселяция всё равно видна)
+     
             GeometryGenerator gen;
             GeometryGenerator::MeshData grid = gen.CreateGrid(4.0f, 4.0f, 7, 7);
 
@@ -708,29 +666,69 @@ void BoxApp::BuildModelGeometry()
         }
     }
 
-    // Загружаем геометрию на GPU
-    const UINT vbSize = (UINT)allVertices.size() * sizeof(Vertex);
-    const UINT ibSize = (UINT)allIndices.size() * sizeof(std::uint32_t);
+   
 
-    ThrowIfFailed(D3DCreateBlob(vbSize, &mModelGeo->VertexBufferCPU));
-    CopyMemory(mModelGeo->VertexBufferCPU->GetBufferPointer(), allVertices.data(), vbSize);
-    ThrowIfFailed(D3DCreateBlob(ibSize, &mModelGeo->IndexBufferCPU));
-    CopyMemory(mModelGeo->IndexBufferCPU->GetBufferPointer(), allIndices.data(), ibSize);
+        {
+            GeometryGenerator gen;
+    
+            GeometryGenerator::MeshData grid = gen.CreateGrid(20.0f, 20.0f, 30, 30);
 
-    mModelGeo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(
-        md3dDevice.Get(), mCommandList.Get(),
-        allVertices.data(), vbSize, mModelGeo->VertexBufferUploader);
-    mModelGeo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(
-        md3dDevice.Get(), mCommandList.Get(),
-        allIndices.data(), ibSize, mModelGeo->IndexBufferUploader);
+            UINT indexOffset = (UINT)allIndices.size();
+            UINT baseV = (UINT)allVertices.size();
 
-    mModelGeo->VertexByteStride = sizeof(Vertex);
-    mModelGeo->VertexBufferByteSize = vbSize;
-    mModelGeo->IndexFormat = DXGI_FORMAT_R32_UINT;
-    mModelGeo->IndexBufferByteSize = ibSize;
+            for (const auto& gv : grid.Vertices)
+            {
+                Vertex v = {};
+                v.Pos = gv.Position;
+                v.Normal = gv.Normal;
+                v.TexC = gv.TexC;
+                v.Tangent = gv.TangentU;
+                allVertices.push_back(v);
+            }
+            for (uint32_t ix : grid.Indices32)
+                allIndices.push_back(baseV + ix);
+
+            SubmeshGeometry submesh;
+            submesh.IndexCount = (UINT)grid.Indices32.size();
+            submesh.StartIndexLocation = indexOffset;
+            submesh.BaseVertexLocation = 0;
+            mModelGeo->DrawArgs["wavePlane"] = submesh;
+
+            RenderItem ri;
+            ri.SubmeshName = "wavePlane";
+            ri.UseTess = true;
+ 
+            ri.TexSrvIndex = mTessObjBaseSrvIndex;         // Диффузная карта
+            ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1;  
+            ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2; 
+            ri.IsStar = false;
+            mRenderItems.push_back(ri);
+        }
+
+        // Загружаем геометрию на GPU
+        const UINT vbSize = (UINT)allVertices.size() * sizeof(Vertex);
+        const UINT ibSize = (UINT)allIndices.size() * sizeof(std::uint32_t);
+
+        ThrowIfFailed(D3DCreateBlob(vbSize, &mModelGeo->VertexBufferCPU));
+        CopyMemory(mModelGeo->VertexBufferCPU->GetBufferPointer(), allVertices.data(), vbSize);
+        ThrowIfFailed(D3DCreateBlob(ibSize, &mModelGeo->IndexBufferCPU));
+        CopyMemory(mModelGeo->IndexBufferCPU->GetBufferPointer(), allIndices.data(), ibSize);
+
+        mModelGeo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(
+            md3dDevice.Get(), mCommandList.Get(),
+            allVertices.data(), vbSize, mModelGeo->VertexBufferUploader);
+        mModelGeo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(
+            md3dDevice.Get(), mCommandList.Get(),
+            allIndices.data(), ibSize, mModelGeo->IndexBufferUploader);
+
+        mModelGeo->VertexByteStride = sizeof(Vertex);
+        mModelGeo->VertexBufferByteSize = vbSize;
+        mModelGeo->IndexFormat = DXGI_FORMAT_R32_UINT;
+        mModelGeo->IndexBufferByteSize = ibSize;
+    
 }
 
-// ============================================================
+
 void BoxApp::ShootLightFromCamera()
 {
     XMVECTOR eye = XMLoadFloat3(&mEyePosW);
@@ -774,7 +772,6 @@ void BoxApp::ShootLightFromCamera()
     mShotCount++;
 }
 
-// ============================================================
 LRESULT BoxApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     if (msg == WM_KEYDOWN)
@@ -786,7 +783,6 @@ LRESULT BoxApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             mShotLights.clear();
             mShotCount = 0;
         }
-        // Тесселяция: [ / ] — сила displacement, Page Up/Down — MaxTess
         if (wParam == VK_OEM_4) // [
             mTessDisplaceScale = MathHelper::Max(0.0f, mTessDisplaceScale - 0.01f);
         if (wParam == VK_OEM_6) // ]
@@ -799,10 +795,9 @@ LRESULT BoxApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return D3DApp::MsgProc(hwnd, msg, wParam, lParam);
 }
 
-// ============================================================
 void BoxApp::Update(const GameTimer& gt)
 {
-    // Клавиатура: W/S — ближе/дальше, A/D — вращение вокруг сцены (LOD тесселяции от расстояния)
+ 
     float dt = gt.DeltaTime();
     const float zoomSpeed = 14.0f;
     const float orbitSpeed = 1.6f;
@@ -866,7 +861,7 @@ void BoxApp::Update(const GameTimer& gt)
     }
 }
 
-// ============================================================
+
 void BoxApp::Draw(const GameTimer& gt)
 {
     ThrowIfFailed(mDirectCmdListAlloc->Reset());
@@ -885,7 +880,7 @@ void BoxApp::Draw(const GameTimer& gt)
         mCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
     }
 
-    // Матрицы
+   
     XMMATRIX world = XMLoadFloat4x4(&mWorld);
     XMMATRIX view = XMLoadFloat4x4(&mView);
     XMMATRIX proj = XMLoadFloat4x4(&mProj);
@@ -962,11 +957,6 @@ void BoxApp::Draw(const GameTimer& gt)
         }
     }
 
-    // ================================================================
-    // ИЗМЕНЕНИЕ 6: TESSELLATION PASS — тесселируемые объекты
-    // Вызываем BeginTessellationPass (он переключает PSO и топологию).
-    // Три SRV подряд в heap'е: [TexSrvIndex]=diffuse, [+1]=normal, [+2]=displace
-    // ================================================================
     mRenderingSystem.BeginTessellationPass(mCommandList.Get(), DepthStencilView());
 
     const float ts = mTessWorldScale;
@@ -981,38 +971,58 @@ void BoxApp::Draw(const GameTimer& gt)
         if (!ri.UseTess) continue;
         if (ri.TexSrvIndex < 0 || ri.NormalSrvIndex < 0 || ri.DisplaceSrvIndex < 0) continue;
 
+       
         GeometryPassConstants gc;
-        XMStoreFloat4x4(&gc.WorldViewProj, XMMatrixTranspose(tessWorld * view * proj));
-        XMStoreFloat4x4(&gc.World, XMMatrixTranspose(tessWorld));
-        XMStoreFloat4x4(&gc.WorldInvTranspose,
-            XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, tessWorld))));
-        gc.Time = gt.TotalTime();
+        XMMATRIX finalWorld;
 
+    
+        if (ri.SubmeshName == "wavePlane")
+        {
+            finalWorld = XMMatrixTranslation(0.0f, -1.0f, 0.0f);
+            gc.pad.x = 1.0f; 
+        }
+        else
+        {
+            const float ts = mTessWorldScale;
+            finalWorld = XMMatrixScaling(ts, ts, ts) *
+                XMMatrixTranslation(mTessWorldOffset.x, mTessWorldOffset.y, mTessWorldOffset.z) *
+                world;
+            gc.pad.x = 0.0f; 
+        }
+
+     
+        XMStoreFloat4x4(&gc.WorldViewProj, XMMatrixTranspose(finalWorld * view * proj));
+        XMStoreFloat4x4(&gc.World, XMMatrixTranspose(finalWorld));
+        XMStoreFloat4x4(&gc.WorldInvTranspose,
+            XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, finalWorld))));
+        gc.Time = gt.TotalTime();
 
         TessellationConstants tc;
         tc.EyePosW = mEyePosW;
-        tc.DisplaceScale = mTessDisplaceScale;
         tc.MinTessDist = mTessMinTessDist;
         tc.MaxTessDist = mTessMaxTessDist;
         tc.MinTess = mTessMinTess;
         tc.MaxTess = mTessMaxTess;
 
-        CD3DX12_GPU_DESCRIPTOR_HANDLE srvBase(
-            mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
+        if (ri.SubmeshName == "wavePlane")
+            tc.DisplaceScale = 0.5f;
+        else
+            tc.DisplaceScale = mTessDisplaceScale;
+
+        CD3DX12_GPU_DESCRIPTOR_HANDLE srvBase(mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
         srvBase.Offset(ri.TexSrvIndex, srvSize);
         mCommandList->SetGraphicsRootDescriptorTable(2, srvBase);
 
-        mRenderingSystem.SetTessellationConstants(
-            mCommandList.Get(), gc, geomCbIndex, tc, tessCbSlot);
-        geomCbIndex++;
-        tessCbSlot++;
+    
+        mRenderingSystem.SetTessellationConstants(mCommandList.Get(), gc, geomCbIndex++, tc, tessCbSlot++);
 
+     
         const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
         mCommandList->DrawIndexedInstanced(
             sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
     }
 
-    // Конец геометрических проходов
+    
     mRenderingSystem.EndGeometryPass(mCommandList.Get());
 
     // ================================================================
@@ -1089,7 +1099,6 @@ void BoxApp::Draw(const GameTimer& gt)
     FlushCommandQueue();
 }
 
-// ============================================================
 void BoxApp::OnResize()
 {
     D3DApp::OnResize();

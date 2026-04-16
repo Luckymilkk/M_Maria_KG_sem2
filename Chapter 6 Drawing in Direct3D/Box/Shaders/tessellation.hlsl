@@ -10,7 +10,8 @@ cbuffer cbPerObject : register(b0)
     float4x4 gWorld;
     float4x4 gWorldInvTranspose;
     float     gTime;
-    float3    pad;
+    float     gIsAnimated; // Используем первый компонент из float3 pad
+    float2    gPad2;       // Остаток паддинга
 };
 
 cbuffer cbTessellation : register(b1)
@@ -115,25 +116,32 @@ DS_OUT DS(HS_TESS_FACTORS input, float3 bary : SV_DomainLocation, const OutputPa
 {
     DS_OUT Out;
 
-    // Интерполяция
+ 
     float3 posW    = bary.x * tri[0].PosW    + bary.y * tri[1].PosW    + bary.z * tri[2].PosW;
     float3 normalW = bary.x * tri[0].NormalW + bary.y * tri[1].NormalW + bary.z * tri[2].NormalW;
     float2 texC    = bary.x * tri[0].TexC    + bary.y * tri[1].TexC    + bary.z * tri[2].TexC;
     float3 tangW   = bary.x * tri[0].TangentW+ bary.y * tri[1].TangentW+ bary.z * tri[2].TangentW;
 
+   
     normalW = normalize(normalW);
 
-    float displacement = gDisplaceMap.SampleLevel(gsamLinear, texC, 0).r;
-    
-    // Смещение по карте высот
-    float offset = (displacement - 0.5f) * gDisplaceScale;
+    float mask = gDisplaceMap.SampleLevel(gsamLinear, texC, 0).r;
+       
+    float hDir = (mask * 5.0f) - 1.0f;
+
+    float freq = 5.0f;
+    float pulse = (sin(gTime * 2.0f + (texC.x * freq) + (texC.y * freq)) + 1.0f) * 0.5f;
+
+    float offset = hDir * pulse * gDisplaceScale;
+
     posW += normalW * offset;
 
-    Out.PosW    = posW;
-    Out.PosH    = mul(float4(posW, 1.0f), gWorldViewProj);
-    Out.NormalW = normalW;
-    Out.TexC    = texC;
+    Out.PosW     = posW;
+    Out.PosH     = mul(float4(posW, 1.0f), gWorldViewProj); // Проекция в пространство экрана
+    Out.NormalW  = normalW;
+    Out.TexC     = texC;
     Out.TangentW = normalize(tangW);
+
     return Out;
 }
 
@@ -146,27 +154,24 @@ struct PSOutput
 
 PSOutput PS(DS_OUT pin)
 {
-    PSOutput output;
+     PSOutput output;
 
-    float4 albedo = gDiffuseMap.Sample(gsamLinear, pin.TexC);
-    output.Albedo = albedo;
+    // Проверяем флаг (мы его ставили только для плоскости в C++)
+    if (gIsAnimated > 0.5f) 
+    {
+        float mask = gDisplaceMap.Sample(gsamLinear, pin.TexC).r;
 
-    // 2. Работа с картой нормалей (Tangent Space -> World Space)
-    float3 N = normalize(pin.NormalW);
-    float3 T = normalize(pin.TangentW - dot(pin.TangentW, N) * N);
-    float3 B = cross(N, T);
-    float3x3 TBN = float3x3(T, B, N);
+        output.Albedo = float4(mask, 0.0f, 0.0f, 1.0f);
 
-    float3 normalSample = gNormalMap.Sample(gsamLinear, pin.TexC).rgb;
-    float3 normalTan = normalSample * 2.0f - 1.0f;
-    
-    // Переводим в мировое пространство
-    float3 worldNormal = normalize(mul(normalTan, TBN));
-
-
-    output.Normal = float4(worldNormal, 0.0f);
-
-    output.Specular = float4(0.3f, 0.3f, 0.3f, 1.0f); 
+        output.Normal = float4(0, 1, 0, 0); // Считаем, что нормаль смотрит строго вверх
+        output.Specular = float4(0, 0, 0, 0); // Никаких белых точек/бликов
+    }
+    else 
+    {
+        output.Albedo = gDiffuseMap.Sample(gsamLinear, pin.TexC);
+        output.Normal = float4(pin.NormalW, 0.0f);
+        output.Specular = float4(0.3f, 0.3f, 0.3f, 1.0f);
+    }
 
     return output;
 }
