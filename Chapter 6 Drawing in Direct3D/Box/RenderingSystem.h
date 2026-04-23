@@ -30,7 +30,6 @@ struct GeometryPassConstants
     DirectX::XMFLOAT4X4 WorldViewProj = MathHelper::Identity4x4();
     DirectX::XMFLOAT4X4 World = MathHelper::Identity4x4();
     DirectX::XMFLOAT4X4 WorldInvTranspose = MathHelper::Identity4x4();
-
     float       Time = 0.0f;
     DirectX::XMFLOAT3    pad = {};
 };
@@ -187,7 +186,7 @@ private:
     std::unique_ptr<UploadBuffer<LightingPassConstants>>  mLightCB;
     std::unique_ptr<UploadBuffer<TessellationConstants>>  mTessCB;
     UINT mGeomCBByteSize = 0;
-    static const UINT kMaxGeometryCBs = 512;
+    static const UINT kMaxGeometryCBs = 4096;
     static const UINT kMaxTessCBs = 512;
 
     std::vector<LightData> mLights;

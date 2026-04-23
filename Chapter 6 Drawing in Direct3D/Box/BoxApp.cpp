@@ -14,6 +14,7 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
 #include "RenderingSystem.h"
+#include <DirectXCollision.h>
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
 using namespace DirectX::PackedVector;
@@ -40,10 +41,14 @@ struct RenderItem
 {
     std::string SubmeshName;
     int         TexSrvIndex;
-    int         NormalSrvIndex = -1; 
-    int         DisplaceSrvIndex = -1; 
+    int         NormalSrvIndex = -1;
+    int         DisplaceSrvIndex = -1;
     bool        IsStar = false;
-    bool        UseTess = false;      
+    bool        UseTess = false;
+
+    XMFLOAT4X4  World = MathHelper::Identity4x4(); // Своя позиция для каждого объекта
+    BoundingBox Bounds;                            // Границы объекта для куллинга
+    bool        IsVisible = true;                  // Флаг: рисовать или нет
 };
 
 static bool RayTriangleIntersect(
@@ -101,6 +106,7 @@ private:
     std::vector<RenderItem> mRenderItems;
 
     XMFLOAT3 mEyePosW = { 0.0f, 0.0f, 0.0f };
+    XMFLOAT3 mCurrCameraPos = { 0.0f, 2.0f, -15.0f }; // Начальная позиция
 
     static const UINT mGbufferRtvOffset = 0;
     static const UINT mGbufferSrvOffset = 0;
@@ -154,6 +160,24 @@ private:
     float mTessWorldScale = 1.22f;   
   
     XMFLOAT3 mTessWorldOffset = { 0.0f, 0.12f, 1.75f };
+
+    enum class CullingMode { None = 0, BruteForce = 1, Octree = 2 };
+    CullingMode mCullingMode = CullingMode::None;
+
+    std::vector<RenderItem> mInstancedItems; // Сотни новых объектов
+
+    struct OctreeNode {
+        BoundingBox Box;
+        std::vector<int> ItemIndices;
+        std::unique_ptr<OctreeNode> Children[8];
+        bool IsLeaf = true;
+    };
+    std::unique_ptr<OctreeNode> mRootNode;
+
+    // Прототипы новых методов
+    void BuildInstancedItems();
+    void BuildOctree(OctreeNode* node, int depth);
+    void GetVisibleItemsOctree(OctreeNode* node, const BoundingFrustum& frustum);
 };
 
 
@@ -192,6 +216,7 @@ bool BoxApp::Initialize()
     mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
     FlushCommandQueue();
     BuildDepthSRV();
+    BuildInstancedItems();
     return true;
 }
 
@@ -731,15 +756,25 @@ void BoxApp::BuildModelGeometry()
 
 void BoxApp::ShootLightFromCamera()
 {
-    XMVECTOR eye = XMLoadFloat3(&mEyePosW);
-    XMVECTOR dir = XMVector3Normalize(XMVectorNegate(eye));
-    const float kStartOffset = 0.12f;
-    XMVECTOR rayOrigin = eye + dir * kStartOffset;
+    // 1. Берем текущую позицию камеры
+    XMVECTOR eye = XMLoadFloat3(&mCurrCameraPos);
+
+    // 2. Вычисляем текущее направление взгляда (то же самое, что в Update)
+    float x = sinf(mPhi) * cosf(mTheta);
+    float z = sinf(mPhi) * sinf(mTheta);
+    float y = cosf(mPhi);
+    XMVECTOR dir = XMVectorSet(x, y, z, 0.0f);
+
+    const float kStartOffset = 0.5f; // Смещение, чтобы свет не "застревал" в камере
+    XMVECTOR rayOrigin = XMVectorAdd(eye, XMVectorScale(dir, kStartOffset));
+
+    // Матрица мира для Спонзы (чтобы проверять столкновения с ней)
     XMMATRIX world = XMLoadFloat4x4(&mSponzaWorld);
     float tMin = FLT_MAX;
-    bool  hit = false;
-    const float kMinHitDistance = 0.001f;
+    bool hit = false;
+    const float kMinHitDistance = 0.1f;
 
+    // Проверка столкновений луча с геометрией (Raycast)
     uint32_t triCount = (uint32_t)mCpuIndices.size() / 3;
     for (uint32_t i = 0; i < triCount; ++i)
     {
@@ -748,15 +783,21 @@ void BoxApp::ShootLightFromCamera()
         XMVECTOR v2 = XMVector3Transform(XMLoadFloat3(&mCpuVertices[mCpuIndices[3 * i + 2]]), world);
         float t = 0.0f;
         if (RayTriangleIntersect(rayOrigin, dir, v0, v1, v2, t) && t > kMinHitDistance)
+        {
             if (t < tMin) { tMin = t; hit = true; }
+        }
     }
-    if (!hit) tMin = 60.0f;
 
+    // Если никуда не попали, свет просто пролетит 100 метров
+    if (!hit) tMin = 100.0f;
+
+    // Создаем новый источник света
     ShotLight sl;
     XMStoreFloat3(&sl.Origin, rayOrigin);
     XMStoreFloat3(&sl.Direction, dir);
     XMStoreFloat3(&sl.Position, rayOrigin);
-    XMStoreFloat3(&sl.Velocity, dir * mLightSpeed);
+    XMStoreFloat3(&sl.Velocity, XMVectorScale(dir, mLightSpeed));
+
     static const XMFLOAT3 palette[] = {
         {1.0f,0.4f,0.1f},{0.2f,0.6f,1.0f},{0.4f,1.0f,0.4f},
         {1.0f,0.2f,0.8f},{1.0f,1.0f,0.3f},{0.5f,0.2f,1.0f}
@@ -766,6 +807,7 @@ void BoxApp::ShootLightFromCamera()
     sl.TargetT = tMin;
     sl.CurrentT = 0.0f;
     sl.IsFlying = true;
+
     mShotLights.push_back(sl);
     if (mShotLights.size() > mMaxShotLights)
         mShotLights.erase(mShotLights.begin());
@@ -791,37 +833,98 @@ LRESULT BoxApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             mTessMaxTess = MathHelper::Min(64.0f, mTessMaxTess + 1.0f);
         if (wParam == VK_NEXT)
             mTessMaxTess = MathHelper::Max(1.0f, mTessMaxTess - 1.0f);
+        if (wParam == '1') mCullingMode = CullingMode::None;
+        if (wParam == '2') mCullingMode = CullingMode::BruteForce;
+        if (wParam == '3') mCullingMode = CullingMode::Octree;
     }
     return D3DApp::MsgProc(hwnd, msg, wParam, lParam);
 }
 
 void BoxApp::Update(const GameTimer& gt)
 {
- 
     float dt = gt.DeltaTime();
-    const float zoomSpeed = 14.0f;
-    const float orbitSpeed = 1.6f;
-    if (GetAsyncKeyState('W') & 0x8000) mRadius -= zoomSpeed * dt;
-    if (GetAsyncKeyState('S') & 0x8000) mRadius += zoomSpeed * dt;
-    if (GetAsyncKeyState('A') & 0x8000) mTheta -= orbitSpeed * dt;
-    if (GetAsyncKeyState('D') & 0x8000) mTheta += orbitSpeed * dt;
-    mRadius = MathHelper::Clamp(mRadius, 1.0f, 150.0f);
 
-    float x = mRadius * sinf(mPhi) * cosf(mTheta);
-    float z = mRadius * sinf(mPhi) * sinf(mTheta);
-    float y = mRadius * cosf(mPhi);
-    mEyePosW = { x, y, z };
+    // --- 1. УПРАВЛЕНИЕ СВОБОДНОЙ КАМЕРОЙ (WASD) ---
+    const float moveSpeed = 40.0f;
 
-    XMVECTOR pos = XMVectorSet(x, y, z, 1.0f);
-    XMVECTOR target = XMVectorZero();
-    XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-    XMStoreFloat4x4(&mView, XMMatrixLookAtLH(pos, target, up));
+    // Вычисляем направление взгляда на основе углов mTheta и mPhi (от мышки)
+    float x = sinf(mPhi) * cosf(mTheta);
+    float z = sinf(mPhi) * sinf(mTheta);
+    float y = cosf(mPhi);
 
-    float s = 1.0f;
-    XMMATRIX sponzaWorld = XMMatrixScaling(s, s, s);
-    XMStoreFloat4x4(&mWorld, sponzaWorld);
-    mSponzaWorld = mWorld;
+    XMVECTOR lookDir = XMVectorSet(x, y, z, 0.0f);
+    XMVECTOR pos = XMLoadFloat3(&mCurrCameraPos);
 
+    // Вперед / Назад
+    if (GetAsyncKeyState('W') & 0x8000)
+        pos = XMVectorAdd(pos, XMVectorScale(lookDir, moveSpeed * dt));
+    if (GetAsyncKeyState('S') & 0x8000)
+        pos = XMVectorSubtract(pos, XMVectorScale(lookDir, moveSpeed * dt));
+
+    // Влево / Вправо (используем векторное произведение для поиска направления "вбок")
+    XMVECTOR upVec = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    XMVECTOR rightDir = XMVector3Normalize(XMVector3Cross(upVec, lookDir));
+
+    if (GetAsyncKeyState('A') & 0x8000)
+        pos = XMVectorAdd(pos, XMVectorScale(rightDir, moveSpeed * dt));
+    if (GetAsyncKeyState('D') & 0x8000)
+        pos = XMVectorSubtract(pos, XMVectorScale(rightDir, moveSpeed * dt));
+
+    // Сохраняем новую позицию
+    XMStoreFloat3(&mCurrCameraPos, pos);
+    mEyePosW = mCurrCameraPos;
+
+    // Обновляем матрицу вида: смотрим из pos в направлении pos + lookDir
+    XMVECTOR target = XMVectorAdd(pos, lookDir);
+    XMStoreFloat4x4(&mView, XMMatrixLookAtLH(pos, target, upVec));
+
+
+    // --- 2. ЛОГИКА FRUSTUM CULLING (ОТСЕЧЕНИЯ) ---
+    XMMATRIX projMat = XMLoadFloat4x4(&mProj);
+    XMMATRIX viewMat = XMLoadFloat4x4(&mView);
+
+    // Создаем Фрустум (пирамиду видимости) из матрицы проекции
+    BoundingFrustum frustum;
+    BoundingFrustum::CreateFromMatrix(frustum, projMat);
+
+    // Переводим Фрустум из пространства камеры в мировое пространство
+    XMMATRIX invView = XMMatrixInverse(nullptr, viewMat);
+    frustum.Transform(frustum, invView);
+
+    // Сбрасываем видимость для всех объектов
+    for (auto& item : mInstancedItems)
+        item.IsVisible = (mCullingMode == CullingMode::None);
+
+    // Выполняем отсечение в зависимости от выбранного режима
+    if (mCullingMode == CullingMode::BruteForce) {
+        // Обычный перебор всех объектов
+        for (auto& item : mInstancedItems) {
+            BoundingBox worldBox;
+            XMMATRIX worldMat = XMLoadFloat4x4(&item.World);
+            item.Bounds.Transform(worldBox, worldMat);
+            if (frustum.Contains(worldBox) != DISJOINT)
+                item.IsVisible = true;
+        }
+    }
+    else if (mCullingMode == CullingMode::Octree) {
+        // Ускоренный поиск через дерево
+        GetVisibleItemsOctree(mRootNode.get(), frustum);
+    }
+
+    // Обновляем заголовок окна информацией о видимости
+    int visibleCount = 0;
+    for (auto& item : mInstancedItems) if (item.IsVisible) visibleCount++;
+
+    std::wstring modeName = (mCullingMode == CullingMode::None) ? L"None" :
+        (mCullingMode == CullingMode::BruteForce) ? L"BruteForce" : L"Octree";
+
+    std::wstring stats = L"Culling: " + modeName +
+        L" | Visible: " + std::to_wstring(visibleCount) +
+        L" / " + std::to_wstring(mInstancedItems.size());
+    SetWindowText(mhMainWnd, stats.c_str());
+
+
+    // --- 3. ЛОГИКА ВЫСТРЕЛОВ СВЕТОМ (SHOT LIGHTS) ---
     if (mShootRequested)
     {
         ShootLightFromCamera();
@@ -834,10 +937,10 @@ void BoxApp::Update(const GameTimer& gt)
     {
         if (sl.IsFlying)
         {
-            float dt = gt.DeltaTime();
             float stepDist = mLightSpeed * dt;
             float triggerT = sl.TargetT - kMarkerRadius;
             if (triggerT < 0.0f) triggerT = 0.0f;
+
             if (sl.CurrentT + stepDist >= triggerT)
             {
                 sl.IsFlying = false;
@@ -846,7 +949,7 @@ void BoxApp::Update(const GameTimer& gt)
                 XMVECTOR d = XMLoadFloat3(&sl.Direction);
                 float placeT = sl.TargetT - kSurfaceBias;
                 if (placeT < 0.0f) placeT = 0.0f;
-                XMStoreFloat3(&sl.Position, o + d * placeT);
+                XMStoreFloat3(&sl.Position, XMVectorAdd(o, XMVectorScale(d, placeT)));
                 sl.Velocity = { 0.0f, 0.0f, 0.0f };
                 sl.CurrentT = sl.TargetT;
             }
@@ -855,10 +958,14 @@ void BoxApp::Update(const GameTimer& gt)
                 sl.CurrentT += stepDist;
                 XMVECTOR p = XMLoadFloat3(&sl.Position);
                 XMVECTOR v = XMLoadFloat3(&sl.Velocity);
-                XMStoreFloat3(&sl.Position, p + v * dt);
+                XMStoreFloat3(&sl.Position, XMVectorAdd(p, XMVectorScale(v, dt)));
             }
         }
     }
+
+    // Обновляем матрицы Спонзы
+    XMStoreFloat4x4(&mWorld, XMMatrixScaling(1.0f, 1.0f, 1.0f));
+    mSponzaWorld = mWorld;
 }
 
 
@@ -1022,6 +1129,34 @@ void BoxApp::Draw(const GameTimer& gt)
             sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
     }
 
+    // После отрисовки основных RenderItems в Tessellation Pass:
+    for (const auto& ri : mInstancedItems)
+    {
+        if (!ri.IsVisible) continue; // Куллинг в действии!
+
+        XMMATRIX worldMat = XMLoadFloat4x4(&ri.World);
+        GeometryPassConstants gc;
+        XMStoreFloat4x4(&gc.WorldViewProj, XMMatrixTranspose(worldMat * view * proj));
+        XMStoreFloat4x4(&gc.World, XMMatrixTranspose(worldMat));
+        XMStoreFloat4x4(&gc.WorldInvTranspose, MathHelper::InverseTranspose(worldMat));
+        gc.Time = gt.TotalTime();
+        gc.pad.x = 0.0f;
+
+        TessellationConstants tc; // Используем общие настройки тесселяции
+        tc.EyePosW = mEyePosW;
+        tc.DisplaceScale = mTessDisplaceScale;
+        tc.MinTessDist = mTessMinTessDist; tc.MaxTessDist = mTessMaxTessDist;
+        tc.MinTess = mTessMinTess; tc.MaxTess = mTessMaxTess;
+
+        CD3DX12_GPU_DESCRIPTOR_HANDLE srv(mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
+        srv.Offset(ri.TexSrvIndex, srvSize);
+        mCommandList->SetGraphicsRootDescriptorTable(2, srv);
+
+        mRenderingSystem.SetTessellationConstants(mCommandList.Get(), gc, geomCbIndex++, tc, tessCbSlot++);
+        mCommandList->DrawIndexedInstanced(mModelGeo->DrawArgs[ri.SubmeshName].IndexCount, 1,
+            mModelGeo->DrawArgs[ri.SubmeshName].StartIndexLocation, 0, 0);
+    }
+
     
     mRenderingSystem.EndGeometryPass(mCommandList.Get());
 
@@ -1130,4 +1265,72 @@ void BoxApp::OnMouseMove(WPARAM btnState, int x, int y)
         mRadius = MathHelper::Clamp(mRadius, 1.0f, 150.0f);
     }
     mLastMousePos.x = x; mLastMousePos.y = y;
+}
+
+void BoxApp::BuildInstancedItems() {
+    // Создаем 500 объектов (10x5x10) - для слабого ноутбука хватит
+    int nX = 6, nY = 6, nZ = 6;
+
+    BoundingBox baseBox;
+    baseBox.Center = { 0,0,0 };
+    baseBox.Extents = { 1.0f, 1.0f, 1.0f }; // Примерный размер кубика
+
+    for (int x = 0; x < nX; ++x) {
+        for (int y = 0; y < nY; ++y) {
+            for (int z = 0; z < nZ; ++z) {
+                RenderItem ri;
+                ri.SubmeshName = "tessMesh";
+                ri.UseTess = false;
+                ri.TexSrvIndex = mTessObjBaseSrvIndex;
+                ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1;
+                ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2;
+
+                // Раставляем их в пространстве
+                XMMATRIX w = XMMatrixTranslation(x * 10.0f - 50.0f, y * 6.0f + 5.0f, z * 10.0f + 20.0f);
+                XMStoreFloat4x4(&ri.World, w);
+                ri.Bounds = baseBox;
+                mInstancedItems.push_back(ri);
+            }
+        }
+    }
+
+    // Строим дерево (Октодерево)
+    mRootNode = std::make_unique<OctreeNode>();
+    mRootNode->Box = BoundingBox(XMFLOAT3(0, 20, 50), XMFLOAT3(100, 100, 100));
+    for (int i = 0; i < (int)mInstancedItems.size(); ++i) mRootNode->ItemIndices.push_back(i);
+    BuildOctree(mRootNode.get(), 0);
+}
+
+void BoxApp::BuildOctree(OctreeNode* node, int depth) {
+    if (depth > 3 || node->ItemIndices.size() <= 5) return;
+    node->IsLeaf = false;
+    XMFLOAT3 c = node->Box.Center;
+    XMFLOAT3 e = node->Box.Extents;
+    XMFLOAT3 h = XMFLOAT3(e.x * 0.5f, e.y * 0.5f, e.z * 0.5f);
+
+    for (int i = 0; i < 8; ++i) {
+        node->Children[i] = std::make_unique<OctreeNode>();
+        XMFLOAT3 nc = c;
+        nc.x += h.x * ((i & 1) ? 1 : -1); nc.y += h.y * ((i & 2) ? 1 : -1); nc.z += h.z * ((i & 4) ? 1 : -1);
+        node->Children[i]->Box = BoundingBox(nc, h);
+        for (int idx : node->ItemIndices) {
+            BoundingBox wb; mInstancedItems[idx].Bounds.Transform(wb, XMLoadFloat4x4(&mInstancedItems[idx].World));
+            if (node->Children[i]->Box.Intersects(wb)) node->Children[i]->ItemIndices.push_back(idx);
+        }
+        BuildOctree(node->Children[i].get(), depth + 1);
+    }
+    node->ItemIndices.clear();
+}
+
+void BoxApp::GetVisibleItemsOctree(OctreeNode* node, const BoundingFrustum& frustum) {
+    if (frustum.Contains(node->Box) == DISJOINT) return;
+    if (node->IsLeaf) {
+        for (int idx : node->ItemIndices) {
+            BoundingBox wb; mInstancedItems[idx].Bounds.Transform(wb, XMLoadFloat4x4(&mInstancedItems[idx].World));
+            if (frustum.Contains(wb) != DISJOINT) mInstancedItems[idx].IsVisible = true;
+        }
+    }
+    else {
+        for (int i = 0; i < 8; ++i) GetVisibleItemsOctree(node->Children[i].get(), frustum);
+    }
 }
