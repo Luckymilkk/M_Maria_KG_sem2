@@ -298,6 +298,8 @@ void BoxApp::LoadTextures()
     addTexDDS(L"models/source/convertio.in_albedo.dds", "tess_diffuse");     // t0
     addTexDDS(L"models/source/convertio.in_normal.dds", "tess_normal");      // t1
     addTexDDS(L"models/source/convertio.in_displacement.dds", "tess_displacement"); // t2
+
+    addTexDDS(L"models/source/CC556105.dds", "human_sprite");
 }
 
 
@@ -728,8 +730,38 @@ void BoxApp::BuildModelGeometry()
             ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2; 
             ri.IsStar = false;
             mRenderItems.push_back(ri);
+
+
         }
 
+
+        //Билборд
+        {
+            GeometryGenerator gen;
+            GeometryGenerator::MeshData quad = gen.CreateGrid(1.0f, 1.0f, 2, 2);
+
+            UINT indexOffset = (UINT)allIndices.size();
+            UINT baseV = (UINT)allVertices.size();
+
+            for (const auto& v : quad.Vertices)
+            {
+                Vertex vert = {};
+
+                vert.Pos = { v.Position.x, v.Position.z, v.Position.y };
+                vert.Normal = { 0.0f, 0.0f, -1.0f };
+                vert.TexC = v.TexC;
+                vert.Tangent = { 1.0f, 0.0f, 0.0f };
+                allVertices.push_back(vert);
+            }
+            for (uint32_t ix : quad.Indices32)
+                allIndices.push_back(baseV + ix);
+
+            SubmeshGeometry submesh;
+            submesh.IndexCount = (UINT)quad.Indices32.size();
+            submesh.StartIndexLocation = indexOffset;
+            submesh.BaseVertexLocation = 0;
+            mModelGeo->DrawArgs["billboard"] = submesh;
+        }
 
         const UINT vbSize = (UINT)allVertices.size() * sizeof(Vertex);
         const UINT ibSize = (UINT)allIndices.size() * sizeof(std::uint32_t);
@@ -983,6 +1015,7 @@ void BoxApp::Draw(const GameTimer& gt)
     mRenderingSystem.BeginGeometryPass(mCommandList.Get(), DepthStencilView());
     mCommandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
+
     UINT geomCbIndex = 0;
 
     // Sponza
@@ -1041,6 +1074,29 @@ void BoxApp::Draw(const GameTimer& gt)
             mCommandList->DrawIndexedInstanced(
                 sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
         }
+    }
+
+    for (const auto& ri : mInstancedItems)
+    {
+        if (!ri.IsVisible) continue; // Куллинг!
+
+        GeometryPassConstants gc;
+        XMMATRIX worldMat = XMLoadFloat4x4(&ri.World);
+
+        XMStoreFloat4x4(&gc.WorldViewProj, XMMatrixTranspose(worldMat * view * proj));
+        XMStoreFloat4x4(&gc.World, XMMatrixTranspose(worldMat));
+        XMStoreFloat4x4(&gc.WorldInvTranspose, MathHelper::InverseTranspose(worldMat));
+
+        gc.pad.x = 2.0f;
+
+        mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), gc, geomCbIndex++);
+
+        CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
+        texHandle.Offset(ri.TexSrvIndex, srvSize);
+        mCommandList->SetGraphicsRootDescriptorTable(1, texHandle);
+
+        const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
+        mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
     }
 
     mRenderingSystem.BeginTessellationPass(mCommandList.Get(), DepthStencilView());
@@ -1247,24 +1303,30 @@ void BoxApp::OnMouseMove(WPARAM btnState, int x, int y)
 }
 
 void BoxApp::BuildInstancedItems() {
+    mInstancedItems.clear();
+
     int nX = 6, nY = 6, nZ = 6;
 
+    int billboardTexIndex = 0;
+    for (int i = 0; i < (int)mAllTextures.size(); ++i) {
+        if (mAllTextures[i]->Name == "human_sprite") { 
+            billboardTexIndex = i; break;
+        }
+    }
+
     BoundingBox baseBox;
-    baseBox.Center = { 0,0,0 };
-    baseBox.Extents = { 5.0f, 2.0f, 1.0f }; 
+    baseBox.Center = { 0, 0, 0 };
+    baseBox.Extents = { 1.0f, 1.0f, 1.0f };
 
     for (int x = 0; x < nX; ++x) {
         for (int y = 0; y < nY; ++y) {
             for (int z = 0; z < nZ; ++z) {
                 RenderItem ri;
-                ri.SubmeshName = "tessMesh";
+                ri.SubmeshName = "billboard";
+                ri.TexSrvIndex = billboardTexIndex;
                 ri.UseTess = false;
-                ri.TexSrvIndex = mTessObjBaseSrvIndex;
-                ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1;
-                ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2;
 
-      
-                XMMATRIX w = XMMatrixTranslation(x * 10.0f - 50.0f, y * 6.0f + 5.0f, z * 10.0f + 20.0f);
+                XMMATRIX w = XMMatrixTranslation(x * 8.0f - 40.0f, y * 3.0f + 1.0f, z * 8.0f + 20.0f);
                 XMStoreFloat4x4(&ri.World, w);
                 ri.Bounds = baseBox;
                 mInstancedItems.push_back(ri);
@@ -1272,10 +1334,12 @@ void BoxApp::BuildInstancedItems() {
         }
     }
 
- 
     mRootNode = std::make_unique<OctreeNode>();
-    mRootNode->Box = BoundingBox(XMFLOAT3(0, 20, 50), XMFLOAT3(100, 100, 100));
-    for (int i = 0; i < (int)mInstancedItems.size(); ++i) mRootNode->ItemIndices.push_back(i);
+    mRootNode->Box = BoundingBox(XMFLOAT3(0, 10, 50), XMFLOAT3(100, 30, 100));
+
+    for (int i = 0; i < (int)mInstancedItems.size(); ++i)
+        mRootNode->ItemIndices.push_back(i);
+
     BuildOctree(mRootNode.get(), 0);
 }
 
