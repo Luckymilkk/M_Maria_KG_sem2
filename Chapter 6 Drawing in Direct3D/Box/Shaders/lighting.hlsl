@@ -95,12 +95,6 @@ float3 CalcSpecular(float3 normal, float3 lightDir, float3 toEye,
     return lightColor * pow(NdotH, shininess);
 }
 
-int SelectCascade(float viewDepth)
-{
-    if (viewDepth < gCascadeSplits.x) return 0;
-    return 1;
-}
-
 float ComputeShadowPCF(float3 posW, int cascadeIdx)
 {
     float4 shadowPosH = mul(float4(posW, 1.0f), gCascadeShadowTransform[cascadeIdx]);
@@ -153,9 +147,13 @@ float4 PS(VertexOut pin) : SV_Target
     float  shininess = max(1.0f, (1.0f - roughness) * 128.0f);
 
     float3 toEye     = normalize(gEyePosW - posW);
-    float viewDepth  = abs(mul(float4(posW, 1.0f), gView).z);
-    int cascadeIdx   = SelectCascade(viewDepth);
-    float shadowTerm = ComputeShadowPCF(posW, cascadeIdx);
+    float viewDepth  = mul(float4(posW, 1.0f), gView).z;
+    float shadowNear = ComputeShadowPCF(posW, 0);
+    float shadowFar  = ComputeShadowPCF(posW, 1);
+    float blendStart = gCascadeSplits.x * 0.90f;
+    float blendEnd   = gCascadeSplits.x * 1.10f;
+    float tCascade   = saturate((viewDepth - blendStart) / max(blendEnd - blendStart, 1e-4f));
+    float shadowTerm = lerp(shadowNear, shadowFar, tCascade);
     float3 totalLight = albedo.rgb * 0.08f;
 
     for (int i = 0; i < gNumLights; ++i)

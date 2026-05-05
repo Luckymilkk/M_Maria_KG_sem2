@@ -1082,6 +1082,21 @@ void BoxApp::ComputeCascadeShadowData(
         }
 
         const float zMult = 6.0f;
+        float extentX = maxs.x - mins.x;
+        float extentY = maxs.y - mins.y;
+        float texelSizeX = extentX / (float)RenderingSystem::kPublicShadowMapSize;
+        float texelSizeY = extentY / (float)RenderingSystem::kPublicShadowMapSize;
+        if (texelSizeX > 1e-6f)
+        {
+            mins.x = floorf(mins.x / texelSizeX) * texelSizeX;
+            maxs.x = floorf(maxs.x / texelSizeX) * texelSizeX;
+        }
+        if (texelSizeY > 1e-6f)
+        {
+            mins.y = floorf(mins.y / texelSizeY) * texelSizeY;
+            maxs.y = floorf(maxs.y / texelSizeY) * texelSizeY;
+        }
+
         XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(
             mins.x, maxs.x, mins.y, maxs.y,
             mins.z - radius * zMult,

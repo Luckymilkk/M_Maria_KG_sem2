@@ -73,6 +73,7 @@ class RenderingSystem
 {
 public:
     static const UINT kShadowCascadeCount = 2;
+    static const UINT kPublicShadowMapSize = 1024;
 
     RenderingSystem() = default;
     ~RenderingSystem() = default;
@@ -228,7 +229,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mShadowDsvHeap = nullptr;
     D3D12_VIEWPORT mShadowViewport = {};
     D3D12_RECT     mShadowScissorRect = {};
-    static const UINT kShadowMapSize = 1024;
+    static const UINT kShadowMapSize = kPublicShadowMapSize;
 
     DXGI_FORMAT mBackBufferFormat = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT mDepthStencilFormat = DXGI_FORMAT_UNKNOWN;
