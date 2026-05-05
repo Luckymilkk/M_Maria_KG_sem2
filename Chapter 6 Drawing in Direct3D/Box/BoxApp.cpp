@@ -46,6 +46,7 @@ struct RenderItem
     int         DisplaceSrvIndex = -1;
     bool        IsStar = false;
     bool        UseTess = false;
+    bool        CastShadow = false;
 
     XMFLOAT4X4  World = MathHelper::Identity4x4();
     BoundingBox Bounds;                           
@@ -506,6 +507,7 @@ void BoxApp::BuildModelGeometry()
         ri.TexSrvIndex = texIndex;
         ri.IsStar = false;
         ri.UseTess = false; 
+        ri.CastShadow = false;
         mRenderItems.push_back(ri);
     }
 
@@ -563,6 +565,7 @@ void BoxApp::BuildModelGeometry()
         ri.TexSrvIndex = texIndex;
         ri.IsStar = true;
         ri.UseTess = false;
+        ri.CastShadow = false;
         mRenderItems.push_back(ri);
     }
 
@@ -661,6 +664,7 @@ void BoxApp::BuildModelGeometry()
             ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1; // normal  (t1)
             ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2; // displace(t2)
             ri.IsStar = false;
+            ri.CastShadow = true;
             mRenderItems.push_back(ri);
         }
         else
@@ -696,6 +700,7 @@ void BoxApp::BuildModelGeometry()
             ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1;
             ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2;
             ri.IsStar = false;
+            ri.CastShadow = true;
             mRenderItems.push_back(ri);
         }
     }
@@ -736,6 +741,7 @@ void BoxApp::BuildModelGeometry()
             ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1;  
             ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2; 
             ri.IsStar = false;
+            ri.CastShadow = true;
             mRenderItems.push_back(ri);
 
 
@@ -1153,7 +1159,7 @@ void BoxApp::Draw(const GameTimer& gt)
 
         for (const auto& ri : mRenderItems)
         {
-            if (ri.IsStar) continue;
+            if (!ri.CastShadow) continue;
 
             XMMATRIX worldMat = XMLoadFloat4x4(&ri.World);
             if (ri.SubmeshName == "tessMesh")
@@ -1499,6 +1505,7 @@ void BoxApp::BuildInstancedItems() {
                 ri.SubmeshName = "billboard";
                 ri.TexSrvIndex = billboardTexIndex;
                 ri.UseTess = false;
+                ri.CastShadow = false;
 
                 XMMATRIX w = XMMatrixTranslation(x * 8.0f - 40.0f, y * 3.0f + 1.0f, z * 8.0f + 20.0f);
                 XMStoreFloat4x4(&ri.World, w);

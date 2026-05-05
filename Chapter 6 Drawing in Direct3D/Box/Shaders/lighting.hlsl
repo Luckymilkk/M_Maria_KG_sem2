@@ -147,7 +147,7 @@ float4 PS(VertexOut pin) : SV_Target
     float  shininess = max(1.0f, (1.0f - roughness) * 128.0f);
 
     float3 toEye     = normalize(gEyePosW - posW);
-    float viewDepth  = mul(float4(posW, 1.0f), gView).z;
+    float viewDepth  = distance(gEyePosW, posW);
     float shadowNear = ComputeShadowPCF(posW, 0);
     float shadowFar  = ComputeShadowPCF(posW, 1);
     float blendStart = gCascadeSplits.x * 0.90f;
