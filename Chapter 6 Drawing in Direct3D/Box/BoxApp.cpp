@@ -565,7 +565,7 @@ void BoxApp::BuildModelGeometry()
         ri.TexSrvIndex = texIndex;
         ri.IsStar = true;
         ri.UseTess = false;
-        ri.CastShadow = false;
+        ri.CastShadow = true;
         mRenderItems.push_back(ri);
     }
 
@@ -998,13 +998,14 @@ void BoxApp::ComputeCascadeShadowData(
     std::array<float, RenderingSystem::kShadowCascadeCount>& outSplits) const
 {
     const float camNear = 1.0f;
-    const float camFar = mShadowMaxDistance;
+    const float camClipFar = 5000.0f; // должен совпадать с far plane в OnResize
+    const float shadowFar = MathHelper::Min(mShadowMaxDistance, camClipFar);
 
     for (UINT i = 0; i < RenderingSystem::kShadowCascadeCount; ++i)
     {
         float p = (float)(i + 1) / (float)RenderingSystem::kShadowCascadeCount;
-        float logSplit = camNear * powf(camFar / camNear, p);
-        float uniSplit = camNear + (camFar - camNear) * p;
+        float logSplit = camNear * powf(shadowFar / camNear, p);
+        float uniSplit = camNear + (shadowFar - camNear) * p;
         outSplits[i] = mCascadeLambda * logSplit + (1.0f - mCascadeLambda) * uniSplit;
     }
 
@@ -1043,8 +1044,8 @@ void BoxApp::ComputeCascadeShadowData(
     for (UINT c = 0; c < RenderingSystem::kShadowCascadeCount; ++c)
     {
         float splitDist = outSplits[c];
-        float tNear = (prevSplitDist - camNear) / (camFar - camNear);
-        float tFar = (splitDist - camNear) / (camFar - camNear);
+        float tNear = (prevSplitDist - camNear) / (camClipFar - camNear);
+        float tFar = (splitDist - camNear) / (camClipFar - camNear);
 
         XMVECTOR cascadeCorners[8];
         for (int i = 0; i < 4; ++i)
