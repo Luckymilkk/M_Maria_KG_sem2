@@ -1093,15 +1093,17 @@ void BoxApp::ComputeCascadeShadowData(
         float extentY = maxs.y - mins.y;
         float texelSizeX = extentX / (float)RenderingSystem::kPublicShadowMapSize;
         float texelSizeY = extentY / (float)RenderingSystem::kPublicShadowMapSize;
+        // Snap to texel grid: floor for min, ceil for max — so the projection
+        // covers the full cascade sub-frustum without shrinking it.
         if (texelSizeX > 1e-6f)
         {
             mins.x = floorf(mins.x / texelSizeX) * texelSizeX;
-            maxs.x = floorf(maxs.x / texelSizeX) * texelSizeX;
+            maxs.x = ceilf(maxs.x  / texelSizeX) * texelSizeX;
         }
         if (texelSizeY > 1e-6f)
         {
             mins.y = floorf(mins.y / texelSizeY) * texelSizeY;
-            maxs.y = floorf(maxs.y / texelSizeY) * texelSizeY;
+            maxs.y = ceilf(maxs.y  / texelSizeY) * texelSizeY;
         }
 
         XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(

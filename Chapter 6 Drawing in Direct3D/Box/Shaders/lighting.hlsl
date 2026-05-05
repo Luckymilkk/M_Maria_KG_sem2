@@ -95,19 +95,28 @@ float3 CalcSpecular(float3 normal, float3 lightDir, float3 toEye,
     return lightColor * pow(NdotH, shininess);
 }
 
+// Returns shadow factor [0..1] (0=fully shadowed, 1=fully lit) using 3x3 PCF.
+// Returns -1.0 if the point lies outside this cascade's shadow map, so the
+// caller can fall back to the next cascade.
 float ComputeShadowPCF(float3 posW, int cascadeIdx)
 {
     float4 shadowPosH = mul(float4(posW, 1.0f), gCascadeShadowTransform[cascadeIdx]);
+    // Perspective divide (orthographic proj keeps w==1, but be safe).
     shadowPosH.xyz /= max(shadowPosH.w, 1e-6f);
 
-    float2 uv = shadowPosH.xy * float2(0.5f, -0.5f) + 0.5f;
-    float depth = shadowPosH.z - gShadowParams.x;
+    // NDC -> UV.  D3D depth is already [0,1].
+    float2 uv    = shadowPosH.xy * float2(0.5f, -0.5f) + 0.5f;
+    float  depth = shadowPosH.z - gShadowParams.x; // apply constant bias
 
-    if (uv.x <= 0.0f || uv.x >= 1.0f || uv.y <= 0.0f || uv.y >= 1.0f || depth <= 0.0f || depth >= 1.0f)
-        return 1.0f;
+    // If the point falls outside the cascade's projection, signal "no coverage".
+    // Use a small inner margin (0.02) so PCF taps near the border don't bleed
+    // outside the texture (the border sampler returns 1.0 = lit there).
+    const float kMargin = 0.02f;
+    if (any(uv < kMargin) || any(uv > 1.0f - kMargin) || depth <= 0.0f || depth >= 1.0f)
+        return -1.0f;
 
     float texel = gShadowParams.y;
-    float sum = 0.0f;
+    float sum   = 0.0f;
 
     [unroll]
     for (int y = -1; y <= 1; ++y)
@@ -116,7 +125,7 @@ float ComputeShadowPCF(float3 posW, int cascadeIdx)
         for (int x = -1; x <= 1; ++x)
         {
             float2 o = float2(x, y) * texel;
-            sum += gShadowMap.SampleCmpLevelZero(gsamShadow, float3(uv + o, cascadeIdx), depth);
+            sum += gShadowMap.SampleCmpLevelZero(gsamShadow, float3(uv + o, (float)cascadeIdx), depth);
         }
     }
 
@@ -148,15 +157,45 @@ float4 PS(VertexOut pin) : SV_Target
 
     float3 toEye     = normalize(gEyePosW - posW);
     float viewDepth  = mul(float4(posW, 1.0f), gView).z;
+
+    // -----------------------------------------------------------------------
+    // Cascade shadow selection.
+    // gCascadeSplits.xy = [split0, split1] (view-space Z boundaries).
+    // We iterate from the nearest cascade outward and use the first one that
+    // covers this pixel.  At the boundary between cascade 0 and 1 we blend
+    // over a 10% overlap zone to hide the transition seam.
+    // -----------------------------------------------------------------------
     float shadowTerm = 1.0f;
-    if (viewDepth > 0.0f && viewDepth <= gCascadeSplits.y)
+    if (viewDepth > 0.0f)
     {
-        float shadowNear = ComputeShadowPCF(posW, 0);
-        float shadowFar  = ComputeShadowPCF(posW, 1);
-        float blendStart = gCascadeSplits.x * 0.90f;
-        float blendEnd   = gCascadeSplits.x * 1.10f;
-        float tCascade   = saturate((viewDepth - blendStart) / max(blendEnd - blendStart, 1e-4f));
-        shadowTerm = lerp(shadowNear, shadowFar, tCascade);
+        // Try cascade 0 first.
+        float s0 = ComputeShadowPCF(posW, 0);
+
+        if (s0 >= 0.0f)
+        {
+            // Point is inside cascade 0.
+            // Optionally blend with cascade 1 near the far boundary of cascade 0
+            // to avoid a hard pop when crossing to the next cascade.
+            float blendStart = gCascadeSplits.x * 0.85f;
+            float blendEnd   = gCascadeSplits.x;
+            if (viewDepth > blendStart)
+            {
+                float s1 = ComputeShadowPCF(posW, 1);
+                float t  = saturate((viewDepth - blendStart) / max(blendEnd - blendStart, 1e-4f));
+                // If cascade 1 didn't cover the point either, fall back to s0 only.
+                shadowTerm = (s1 >= 0.0f) ? lerp(s0, s1, t) : s0;
+            }
+            else
+            {
+                shadowTerm = s0;
+            }
+        }
+        else
+        {
+            // Outside cascade 0 — try cascade 1.
+            float s1 = ComputeShadowPCF(posW, 1);
+            shadowTerm = (s1 >= 0.0f) ? s1 : 1.0f; // beyond all cascades → fully lit
+        }
     }
     float3 totalLight = albedo.rgb * 0.08f;
 
