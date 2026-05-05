@@ -15,6 +15,7 @@
 #include "tiny_obj_loader.h"
 #include "RenderingSystem.h"
 #include <DirectXCollision.h>
+#include <array>
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
 using namespace DirectX::PackedVector;
@@ -93,6 +94,8 @@ private:
     void BuildDescriptorHeaps();
     void BuildModelGeometry();
     void BuildDepthSRV();
+    void ComputeCascadeShadowData(std::array<XMFLOAT4X4, RenderingSystem::kShadowCascadeCount>& outShadowTransforms,
+        std::array<float, RenderingSystem::kShadowCascadeCount>& outSplits) const;
     void ShootLightFromCamera();
 
 private:
@@ -111,6 +114,7 @@ private:
     static const UINT mGbufferRtvOffset = 0;
     static const UINT mGbufferSrvOffset = 0;
     static const UINT mDepthSrvOffset = GBuffer::NumRTs;
+    static const UINT mShadowSrvOffset = GBuffer::NumRTs + 1;
 
     std::vector<std::unique_ptr<MyTexture>> mAllTextures;
     std::unique_ptr<MeshGeometry>           mModelGeo = nullptr;
@@ -160,6 +164,9 @@ private:
     float mTessWorldScale = 1.22f;   
   
     XMFLOAT3 mTessWorldOffset = { 0.0f, 0.12f, 1.75f };
+    XMFLOAT3 mMainLightDir = { 0.3f, -1.0f, 0.5f };
+    float mCascadeLambda = 0.85f;
+    float mShadowMaxDistance = 250.0f;
 
     enum class CullingMode { None = 0, BruteForce = 1, Octree = 2 };
     CullingMode mCullingMode = CullingMode::None;
@@ -314,9 +321,9 @@ void BoxApp::BuildDescriptorHeaps()
     rtvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&mGbufferRtvHeap)));
 
-    // SRV heap для G-buffer + depth
+    // SRV heap для G-buffer + depth + shadow array
     D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
-    srvDesc.NumDescriptors = GBuffer::NumRTs + 1;
+    srvDesc.NumDescriptors = GBuffer::NumRTs + 2;
     srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&mSrvHeap)));
@@ -333,7 +340,7 @@ void BoxApp::BuildDescriptorHeaps()
         mClientWidth, mClientHeight,
         mBackBufferFormat, mDepthStencilFormat,
         mGbufferRtvHeap.Get(), mSrvHeap.Get(),
-        mGbufferRtvOffset, mGbufferSrvOffset);
+        mGbufferRtvOffset, mGbufferSrvOffset, mShadowSrvOffset);
 
     UINT srvSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     CD3DX12_CPU_DESCRIPTOR_HANDLE hDesc(mObjectSrvHeap->GetCPUDescriptorHandleForHeapStart());
@@ -980,6 +987,112 @@ void BoxApp::Update(const GameTimer& gt)
     mSponzaWorld = mWorld;
 }
 
+void BoxApp::ComputeCascadeShadowData(
+    std::array<XMFLOAT4X4, RenderingSystem::kShadowCascadeCount>& outShadowTransforms,
+    std::array<float, RenderingSystem::kShadowCascadeCount>& outSplits) const
+{
+    const float camNear = 1.0f;
+    const float camFar = mShadowMaxDistance;
+
+    for (UINT i = 0; i < RenderingSystem::kShadowCascadeCount; ++i)
+    {
+        float p = (float)(i + 1) / (float)RenderingSystem::kShadowCascadeCount;
+        float logSplit = camNear * powf(camFar / camNear, p);
+        float uniSplit = camNear + (camFar - camNear) * p;
+        outSplits[i] = mCascadeLambda * logSplit + (1.0f - mCascadeLambda) * uniSplit;
+    }
+
+    XMMATRIX view = XMLoadFloat4x4(&mView);
+    XMMATRIX proj = XMLoadFloat4x4(&mProj);
+    XMMATRIX invViewProj = XMMatrixInverse(nullptr, view * proj);
+    XMVECTOR lightDir = XMVector3Normalize(XMLoadFloat3(&mMainLightDir));
+
+    XMVECTOR frustumCornersWS[8];
+    int idx = 0;
+    for (int z = 0; z <= 1; ++z)
+    {
+        float ndcZ = (float)z;
+        for (int y = 0; y <= 1; ++y)
+        {
+            float ndcY = y ? -1.0f : 1.0f;
+            for (int x = 0; x <= 1; ++x)
+            {
+                float ndcX = x ? 1.0f : -1.0f;
+                XMVECTOR p = XMVectorSet(ndcX, ndcY, ndcZ, 1.0f);
+                XMVECTOR world = XMVector4Transform(p, invViewProj);
+                world /= XMVectorSplatW(world);
+                frustumCornersWS[idx++] = world;
+            }
+        }
+    }
+
+    XMVECTOR nearCorners[4] = {
+        frustumCornersWS[0], frustumCornersWS[1], frustumCornersWS[2], frustumCornersWS[3]
+    };
+    XMVECTOR farCorners[4] = {
+        frustumCornersWS[4], frustumCornersWS[5], frustumCornersWS[6], frustumCornersWS[7]
+    };
+
+    float prevSplitDist = camNear;
+    for (UINT c = 0; c < RenderingSystem::kShadowCascadeCount; ++c)
+    {
+        float splitDist = outSplits[c];
+        float tNear = (prevSplitDist - camNear) / (camFar - camNear);
+        float tFar = (splitDist - camNear) / (camFar - camNear);
+
+        XMVECTOR cascadeCorners[8];
+        for (int i = 0; i < 4; ++i)
+        {
+            XMVECTOR ray = farCorners[i] - nearCorners[i];
+            cascadeCorners[i] = nearCorners[i] + ray * tNear;
+            cascadeCorners[i + 4] = nearCorners[i] + ray * tFar;
+        }
+
+        XMVECTOR center = XMVectorZero();
+        for (int i = 0; i < 8; ++i) center += cascadeCorners[i];
+        center /= 8.0f;
+
+        float radius = 0.0f;
+        for (int i = 0; i < 8; ++i)
+        {
+            float dist = XMVectorGetX(XMVector3Length(cascadeCorners[i] - center));
+            radius = MathHelper::Max(radius, dist);
+        }
+        radius = ceilf(radius * 16.0f) / 16.0f;
+
+        XMVECTOR eye = center - lightDir * (radius * 2.5f);
+        XMVECTOR up = XMVectorSet(0, 1, 0, 0);
+        if (fabsf(XMVectorGetX(XMVector3Dot(up, lightDir))) > 0.95f)
+            up = XMVectorSet(0, 0, 1, 0);
+
+        XMMATRIX lightView = XMMatrixLookAtLH(eye, center, up);
+
+        XMFLOAT3 mins(FLT_MAX, FLT_MAX, FLT_MAX), maxs(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+        for (int i = 0; i < 8; ++i)
+        {
+            XMVECTOR cornerLS = XMVector3TransformCoord(cascadeCorners[i], lightView);
+            XMFLOAT3 p;
+            XMStoreFloat3(&p, cornerLS);
+            mins.x = MathHelper::Min(mins.x, p.x);
+            mins.y = MathHelper::Min(mins.y, p.y);
+            mins.z = MathHelper::Min(mins.z, p.z);
+            maxs.x = MathHelper::Max(maxs.x, p.x);
+            maxs.y = MathHelper::Max(maxs.y, p.y);
+            maxs.z = MathHelper::Max(maxs.z, p.z);
+        }
+
+        const float zMult = 6.0f;
+        XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(
+            mins.x, maxs.x, mins.y, maxs.y,
+            mins.z - radius * zMult,
+            maxs.z + radius * zMult);
+
+        XMMATRIX shadowTransform = lightView * lightProj;
+        XMStoreFloat4x4(&outShadowTransforms[c], XMMatrixTranspose(shadowTransform));
+        prevSplitDist = splitDist;
+    }
+}
+
 
 void BoxApp::Draw(const GameTimer& gt)
 {
@@ -1009,6 +1122,49 @@ void BoxApp::Draw(const GameTimer& gt)
 
     mCommandList->IASetVertexBuffers(0, 1, &mModelGeo->VertexBufferView());
     mCommandList->IASetIndexBuffer(&mModelGeo->IndexBufferView());
+
+    std::array<XMFLOAT4X4, RenderingSystem::kShadowCascadeCount> cascadeShadowTransforms;
+    std::array<float, RenderingSystem::kShadowCascadeCount> cascadeSplits;
+    ComputeCascadeShadowData(cascadeShadowTransforms, cascadeSplits);
+
+    mRenderingSystem.BeginShadowPass(mCommandList.Get());
+    mCommandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    UINT shadowCbIndex = 0;
+    for (UINT c = 0; c < RenderingSystem::kShadowCascadeCount; ++c)
+    {
+        mRenderingSystem.BeginShadowCascade(mCommandList.Get(), c);
+        XMMATRIX shadowViewProj = XMMatrixTranspose(XMLoadFloat4x4(&cascadeShadowTransforms[c]));
+
+        for (const auto& ri : mRenderItems)
+        {
+            if (ri.IsStar) continue;
+
+            XMMATRIX worldMat = XMLoadFloat4x4(&ri.World);
+            if (ri.SubmeshName == "tessMesh")
+            {
+                worldMat = XMMatrixScaling(mTessWorldScale, mTessWorldScale, mTessWorldScale) *
+                    XMMatrixTranslation(mTessWorldOffset.x, mTessWorldOffset.y, mTessWorldOffset.z) * world;
+            }
+            else if (ri.SubmeshName == "wavePlane")
+            {
+                worldMat = XMMatrixTranslation(0.0f, -1.0f, 0.0f);
+            }
+
+            GeometryPassConstants sc;
+            XMStoreFloat4x4(&sc.WorldViewProj, XMMatrixTranspose(worldMat * shadowViewProj));
+            mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), sc, shadowCbIndex++);
+
+            const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
+            mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
+        }
+
+        // На слабых GPU отключаем тени от инстансированных билбордов:
+        // это сильно уменьшает нагрузку на shadow-pass, при этом CSM для основной сцены сохраняется.
+    }
+    mRenderingSystem.EndShadowPass(mCommandList.Get());
+    mCommandList->RSSetViewports(1, &mScreenViewport);
+    mCommandList->RSSetScissorRects(1, &mScissorRect);
 
     // GEOMETRY PASS
 
@@ -1215,7 +1371,7 @@ void BoxApp::Draw(const GameTimer& gt)
     mCommandList->ClearRenderTargetView(CurrentBackBufferView(), Colors::Black, 0, nullptr);
 
     mRenderingSystem.ClearLights();
-    mRenderingSystem.AddDirectionalLight({ 0.3f,-1.0f,0.5f }, { 1.0f,0.95f,0.8f }, 1.0f);
+    mRenderingSystem.AddDirectionalLight(mMainLightDir, { 1.0f,0.95f,0.8f }, 1.0f);
     mRenderingSystem.AddPointLight({ 0.0f,2.0f, 0.0f }, { 1.0f,0.2f,0.1f }, 3.0f, 8.0f);
     mRenderingSystem.AddPointLight({ 5.0f,2.0f,-3.0f }, { 0.1f,0.5f,1.0f }, 2.0f, 6.0f);
     mRenderingSystem.AddSpotLight({ 0.0f,5.0f,0.0f }, { 0.0f,-1.0f,0.0f },
@@ -1225,9 +1381,11 @@ void BoxApp::Draw(const GameTimer& gt)
     XMMATRIX invProj = XMMatrixInverse(nullptr, proj);
     XMMATRIX invViewProj = XMMatrixInverse(nullptr, view * proj);
     XMFLOAT4X4 ivp, iv, ip;
+    XMFLOAT4X4 vv;
     XMStoreFloat4x4(&ivp, XMMatrixTranspose(invViewProj));
     XMStoreFloat4x4(&iv, XMMatrixTranspose(invView));
     XMStoreFloat4x4(&ip, XMMatrixTranspose(invProj));
+    XMStoreFloat4x4(&vv, XMMatrixTranspose(view));
 
     const int kBaseLights = 4;
     int shotBudget = kMaxLights - kBaseLights;
@@ -1249,7 +1407,8 @@ void BoxApp::Draw(const GameTimer& gt)
 
     mRenderingSystem.DoLightingPass(
         mCommandList.Get(), CurrentBackBufferView(), DepthStencilView(),
-        mEyePosW, ivp, iv, ip, mDepthSrvGpuHandle);
+        mEyePosW, ivp, iv, ip, vv, cascadeShadowTransforms.data(), cascadeSplits.data(), mDepthSrvGpuHandle,
+        CD3DX12_GPU_DESCRIPTOR_HANDLE(mSrvHeap->GetGPUDescriptorHandleForHeapStart(), mShadowSrvOffset, srvSize));
 
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         mDepthStencilBuffer.Get(),
@@ -1278,7 +1437,7 @@ void BoxApp::OnResize()
     mRenderingSystem.OnResize(
         md3dDevice.Get(), mClientWidth, mClientHeight,
         mGbufferRtvHeap.Get(), mSrvHeap.Get(),
-        mGbufferRtvOffset, mGbufferSrvOffset);
+        mGbufferRtvOffset, mGbufferSrvOffset, mShadowSrvOffset);
     BuildDepthSRV();
 }
 

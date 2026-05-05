@@ -6,8 +6,10 @@ Texture2D          gAlbedo   : register(t0);
 Texture2D          gNormal   : register(t1);
 Texture2D          gSpecular : register(t2);
 Texture2D<float>   gDepth    : register(t3);
+Texture2DArray<float> gShadowMap : register(t4);
 
 SamplerState gsamPoint : register(s0);
+SamplerComparisonState gsamShadow : register(s1);
 
 #define kMaxLights 64
 #define LIGHT_DIRECTIONAL 0
@@ -36,6 +38,11 @@ cbuffer cbLighting : register(b0)
     float4x4  gInvViewProj;
     float4x4  gInvView;
     float4x4  gInvProj;
+    float4x4  gView;
+
+    float4x4  gCascadeShadowTransform[4];
+    float4    gCascadeSplits;
+    float4    gShadowParams; // x=bias, y=texelSize, z=pcfRadius
 };
 
 struct VertexIn  { float3 PosL : POSITION; float2 TexC : TEXCOORD; };
@@ -88,6 +95,40 @@ float3 CalcSpecular(float3 normal, float3 lightDir, float3 toEye,
     return lightColor * pow(NdotH, shininess);
 }
 
+int SelectCascade(float viewDepth)
+{
+    if (viewDepth < gCascadeSplits.x) return 0;
+    return 1;
+}
+
+float ComputeShadowPCF(float3 posW, int cascadeIdx)
+{
+    float4 shadowPosH = mul(float4(posW, 1.0f), gCascadeShadowTransform[cascadeIdx]);
+    shadowPosH.xyz /= max(shadowPosH.w, 1e-6f);
+
+    float2 uv = shadowPosH.xy * float2(0.5f, -0.5f) + 0.5f;
+    float depth = shadowPosH.z - gShadowParams.x;
+
+    if (uv.x <= 0.0f || uv.x >= 1.0f || uv.y <= 0.0f || uv.y >= 1.0f || depth <= 0.0f || depth >= 1.0f)
+        return 1.0f;
+
+    float texel = gShadowParams.y;
+    float sum = 0.0f;
+
+    [unroll]
+    for (int y = -1; y <= 1; ++y)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; ++x)
+        {
+            float2 o = float2(x, y) * texel;
+            sum += gShadowMap.SampleCmpLevelZero(gsamShadow, float3(uv + o, cascadeIdx), depth);
+        }
+    }
+
+    return sum / 9.0f;
+}
+
 float4 PS(VertexOut pin) : SV_Target
 {
     // Depth читаем по UV (point sample), чтобы корректно совпадать с G-buffer UV.
@@ -112,6 +153,9 @@ float4 PS(VertexOut pin) : SV_Target
     float  shininess = max(1.0f, (1.0f - roughness) * 128.0f);
 
     float3 toEye     = normalize(gEyePosW - posW);
+    float viewDepth  = abs(mul(float4(posW, 1.0f), gView).z);
+    int cascadeIdx   = SelectCascade(viewDepth);
+    float shadowTerm = ComputeShadowPCF(posW, cascadeIdx);
     float3 totalLight = albedo.rgb * 0.08f;
 
     for (int i = 0; i < gNumLights; ++i)
@@ -125,6 +169,7 @@ float4 PS(VertexOut pin) : SV_Target
         if (light.Type == LIGHT_DIRECTIONAL)
         {
             lightDir = normalize(-light.Direction);
+            atten = shadowTerm;
         }
         else if (light.Type == LIGHT_POINT)
         {

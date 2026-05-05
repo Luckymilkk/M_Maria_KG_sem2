@@ -62,11 +62,18 @@ struct LightingPassConstants
     DirectX::XMFLOAT4X4 InvViewProj = MathHelper::Identity4x4();
     DirectX::XMFLOAT4X4 InvView;
     DirectX::XMFLOAT4X4 InvProj;
+    DirectX::XMFLOAT4X4 View;
+
+    DirectX::XMFLOAT4X4 CascadeShadowTransform[4];
+    DirectX::XMFLOAT4 CascadeSplits = { 10.0f, 30.0f, 80.0f, 150.0f };
+    DirectX::XMFLOAT4 ShadowParams = { 0.0020f, 1.0f / 1024.0f, 1.0f, 0.0f }; // bias, texelSize, pcfRadius, pad
 };
 
 class RenderingSystem
 {
 public:
+    static const UINT kShadowCascadeCount = 2;
+
     RenderingSystem() = default;
     ~RenderingSystem() = default;
 
@@ -82,7 +89,8 @@ public:
         ID3D12DescriptorHeap* rtvHeap,
         ID3D12DescriptorHeap* srvHeap,
         UINT gbufferRtvOffset,
-        UINT gbufferSrvOffset
+        UINT gbufferSrvOffset,
+        UINT shadowSrvOffset
     );
 
     void OnResize(
@@ -91,7 +99,8 @@ public:
         ID3D12DescriptorHeap* rtvHeap,
         ID3D12DescriptorHeap* srvHeap,
         UINT gbufferRtvOffset,
-        UINT gbufferSrvOffset
+        UINT gbufferSrvOffset,
+        UINT shadowSrvOffset
     );
 
     void ClearLights() { mLights.clear(); }
@@ -121,6 +130,10 @@ public:
         ID3D12GraphicsCommandList* cmdList,
         const GeometryPassConstants& constants,
         UINT cbIndex);
+
+    void BeginShadowPass(ID3D12GraphicsCommandList* cmdList);
+    void BeginShadowCascade(ID3D12GraphicsCommandList* cmdList, UINT cascadeIndex);
+    void EndShadowPass(ID3D12GraphicsCommandList* cmdList);
 
     // ---- Tessellation pass ----
 
@@ -154,15 +167,21 @@ public:
         DirectX::XMFLOAT4X4 invViewProj,
         DirectX::XMFLOAT4X4 invView,
         DirectX::XMFLOAT4X4 invProj,
-        D3D12_GPU_DESCRIPTOR_HANDLE depthSrvHandle);
+        DirectX::XMFLOAT4X4 view,
+        const DirectX::XMFLOAT4X4* cascadeShadowTransforms,
+        const float* cascadeSplits,
+        D3D12_GPU_DESCRIPTOR_HANDLE depthSrvHandle,
+        D3D12_GPU_DESCRIPTOR_HANDLE shadowSrvHandle);
 
 private:
     void BuildGeometryPassPSO(ID3D12Device* device, DXGI_FORMAT depthStencilFormat);
     void BuildLightingPassPSO(ID3D12Device* device, DXGI_FORMAT backBufferFormat,
         DXGI_FORMAT depthStencilFormat);
     void BuildTessellationPSO(ID3D12Device* device, DXGI_FORMAT depthStencilFormat);
+    void BuildShadowPassPSO(ID3D12Device* device, DXGI_FORMAT depthStencilFormat);
     void BuildRootSignatures(ID3D12Device* device);
     void BuildFullscreenQuad(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList);
+    void BuildShadowMaps(ID3D12Device* device, UINT shadowSrvOffset);
 
     GBuffer mGBuffer;
 
@@ -170,16 +189,19 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mGeometryRootSig;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mLightingRootSig;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mTessRootSig;     // для тесселяционного прохода
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> mShadowRootSig;
 
     // Pipeline states
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometryPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mLightingPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mTessPSO;         // с HS + DS
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mShadowPSO;
 
     // Shaders
     Microsoft::WRL::ComPtr<ID3DBlob> mGeomVS, mGeomPS;
     Microsoft::WRL::ComPtr<ID3DBlob> mLightVS, mLightPS;
     Microsoft::WRL::ComPtr<ID3DBlob> mTessVS, mTessHS, mTessDS, mTessPS;
+    Microsoft::WRL::ComPtr<ID3DBlob> mShadowVS;
 
     // Constant buffers
     std::unique_ptr<UploadBuffer<GeometryPassConstants>>  mGeomCB;
@@ -198,6 +220,15 @@ private:
 
     ID3D12DescriptorHeap* mSrvHeap = nullptr;
     UINT                  mGbufferSrvOffset = 0;
+    UINT                  mShadowSrvOffset = 0;
+    UINT                  mSrvDescriptorSize = 0;
+    UINT                  mDsvDescriptorSize = 0;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> mShadowMap = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mShadowDsvHeap = nullptr;
+    D3D12_VIEWPORT mShadowViewport = {};
+    D3D12_RECT     mShadowScissorRect = {};
+    static const UINT kShadowMapSize = 1024;
 
     DXGI_FORMAT mBackBufferFormat = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT mDepthStencilFormat = DXGI_FORMAT_UNKNOWN;
