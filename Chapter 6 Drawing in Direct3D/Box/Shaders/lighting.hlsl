@@ -147,13 +147,17 @@ float4 PS(VertexOut pin) : SV_Target
     float  shininess = max(1.0f, (1.0f - roughness) * 128.0f);
 
     float3 toEye     = normalize(gEyePosW - posW);
-    float viewDepth  = distance(gEyePosW, posW);
-    float shadowNear = ComputeShadowPCF(posW, 0);
-    float shadowFar  = ComputeShadowPCF(posW, 1);
-    float blendStart = gCascadeSplits.x * 0.90f;
-    float blendEnd   = gCascadeSplits.x * 1.10f;
-    float tCascade   = saturate((viewDepth - blendStart) / max(blendEnd - blendStart, 1e-4f));
-    float shadowTerm = lerp(shadowNear, shadowFar, tCascade);
+    float viewDepth  = mul(float4(posW, 1.0f), gView).z;
+    float shadowTerm = 1.0f;
+    if (viewDepth > 0.0f && viewDepth <= gCascadeSplits.y)
+    {
+        float shadowNear = ComputeShadowPCF(posW, 0);
+        float shadowFar  = ComputeShadowPCF(posW, 1);
+        float blendStart = gCascadeSplits.x * 0.90f;
+        float blendEnd   = gCascadeSplits.x * 1.10f;
+        float tCascade   = saturate((viewDepth - blendStart) / max(blendEnd - blendStart, 1e-4f));
+        shadowTerm = lerp(shadowNear, shadowFar, tCascade);
+    }
     float3 totalLight = albedo.rgb * 0.08f;
 
     for (int i = 0; i < gNumLights; ++i)

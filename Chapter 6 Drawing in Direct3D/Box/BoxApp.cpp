@@ -741,7 +741,7 @@ void BoxApp::BuildModelGeometry()
             ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1;  
             ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2; 
             ri.IsStar = false;
-            ri.CastShadow = true;
+            ri.CastShadow = false; // Большая плоскость даёт паразитный «квадрат» в CSM.
             mRenderItems.push_back(ri);
 
 
