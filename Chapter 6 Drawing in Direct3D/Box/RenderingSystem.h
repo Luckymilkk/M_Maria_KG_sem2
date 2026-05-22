@@ -5,7 +5,6 @@
 #include "GBuffer.h"
 #include <vector>
 
-
 enum class LightType : int
 {
     Directional = 0,
@@ -34,18 +33,21 @@ struct GeometryPassConstants
     DirectX::XMFLOAT3    pad = {};
 };
 
-// Константы для тесселяционного прохода (cbuffer b1 в tessellation.hlsl)
 struct TessellationConstants
 {
     DirectX::XMFLOAT3 EyePosW = { 0,0,0 };
-    float             DisplaceScale = 0.05f;  // сила смещения
+    float             DisplaceScale = 0.05f;
 
-    float MinTessDist = 2.0f;   // расстояние "вблизи"  → MaxTess
-    float MaxTessDist = 50.0f;  // расстояние "вдали"   → MinTess
-    float MinTess = 1.0f;   // TF когда объект далеко
-    float MaxTess = 16.0f;  // TF когда объект близко
+    float MinTessDist = 2.0f;
+    float MaxTessDist = 50.0f;
+    float MinTess = 1.0f;
+    float MaxTess = 16.0f;
 };
 
+struct ShadowPassConstants
+{
+    DirectX::XMFLOAT4X4 WorldViewProj = MathHelper::Identity4x4();
+};
 
 static const int kMaxLights = 64;
 
@@ -62,21 +64,15 @@ struct LightingPassConstants
     DirectX::XMFLOAT4X4 InvViewProj = MathHelper::Identity4x4();
     DirectX::XMFLOAT4X4 InvView;
     DirectX::XMFLOAT4X4 InvProj;
-    DirectX::XMFLOAT4X4 View;
 
-    DirectX::XMFLOAT4X4 CascadeShadowTransform[4];
-    DirectX::XMFLOAT4 CascadeSplits = { 10.0f, 30.0f, 80.0f, 150.0f };
-    // bias: чуть больше чтобы убрать shadow acne при малом shadowFar;
-    // texelSize автоматически масштабируется под 2048 map.
-    DirectX::XMFLOAT4 ShadowParams = { 0.0008f, 1.0f / 2048.0f, 1.0f, 0.0f };
+    // CSM данные для пиксельного шейдера
+    DirectX::XMFLOAT4X4 LightViewProj[3];
+    float               CascadeEndDepths[4]; // До 4-х элементов для выравнивания границы
 };
 
 class RenderingSystem
 {
 public:
-    static const UINT kShadowCascadeCount = 2;
-    static const UINT kPublicShadowMapSize = 2048;
-
     RenderingSystem() = default;
     ~RenderingSystem() = default;
 
@@ -92,8 +88,7 @@ public:
         ID3D12DescriptorHeap* rtvHeap,
         ID3D12DescriptorHeap* srvHeap,
         UINT gbufferRtvOffset,
-        UINT gbufferSrvOffset,
-        UINT shadowSrvOffset
+        UINT gbufferSrvOffset
     );
 
     void OnResize(
@@ -102,8 +97,7 @@ public:
         ID3D12DescriptorHeap* rtvHeap,
         ID3D12DescriptorHeap* srvHeap,
         UINT gbufferRtvOffset,
-        UINT gbufferSrvOffset,
-        UINT shadowSrvOffset
+        UINT gbufferSrvOffset
     );
 
     void ClearLights() { mLights.clear(); }
@@ -134,20 +128,10 @@ public:
         const GeometryPassConstants& constants,
         UINT cbIndex);
 
-    void BeginShadowPass(ID3D12GraphicsCommandList* cmdList);
-    void BeginShadowCascade(ID3D12GraphicsCommandList* cmdList, UINT cascadeIndex);
-    void EndShadowPass(ID3D12GraphicsCommandList* cmdList);
-
-    // ---- Tessellation pass ----
-
-    // Начало геометрического прохода с тесселяцией.
-    // Вызывать вместо BeginGeometryPass для объектов с тесселяцией.
     void BeginTessellationPass(
         ID3D12GraphicsCommandList* cmdList,
         D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle);
 
-    // Устанавливает константы тесселяции (cbuffer b1) и геометрии (cbuffer b0).
-    // tessIndex — слот в буфере тесселяции (обычно 0, если объект один).
     void SetTessellationConstants(
         ID3D12GraphicsCommandList* cmdList,
         const GeometryPassConstants& geomConsts,
@@ -155,13 +139,25 @@ public:
         const TessellationConstants& tessConsts,
         UINT tessIndex = 0);
 
-    // ---- Root signatures / PSOs (геттеры) ----
+    // ---- Shadow Pass ----
+    void BeginShadowPass(ID3D12GraphicsCommandList* cmdList,
+        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle,
+        D3D12_VIEWPORT viewport, D3D12_RECT scissor);
+
+    void SetShadowPassConstants(
+        ID3D12GraphicsCommandList* cmdList,
+        const ShadowPassConstants& constants,
+        UINT cbIndex);
+
     ID3D12RootSignature* GetGeometryRootSignature() const { return mGeometryRootSig.Get(); }
     ID3D12PipelineState* GetGeometryPSO()           const { return mGeometryPSO.Get(); }
     ID3D12Resource* GetGeometryCBResource()    const { return mGeomCB->Resource(); }
 
     ID3D12RootSignature* GetTessellationRootSignature() const { return mTessRootSig.Get(); }
     ID3D12PipelineState* GetTessellationPSO()           const { return mTessPSO.Get(); }
+
+    ID3D12RootSignature* GetShadowRootSignature() const { return mShadowRootSig.Get(); }
+    ID3D12PipelineState* GetShadowPSO()           const { return mShadowPSO.Get(); }
 
     void DoLightingPass(ID3D12GraphicsCommandList* cmdList,
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle,
@@ -170,68 +166,55 @@ public:
         DirectX::XMFLOAT4X4 invViewProj,
         DirectX::XMFLOAT4X4 invView,
         DirectX::XMFLOAT4X4 invProj,
-        DirectX::XMFLOAT4X4 view,
-        const DirectX::XMFLOAT4X4* cascadeShadowTransforms,
-        const float* cascadeSplits,
         D3D12_GPU_DESCRIPTOR_HANDLE depthSrvHandle,
-        D3D12_GPU_DESCRIPTOR_HANDLE shadowSrvHandle);
+        D3D12_GPU_DESCRIPTOR_HANDLE shadowSrvHandle, // SRV массива карт теней
+        const DirectX::XMMATRIX* lightViewProjMats,   // Матрицы CSM
+        const float* splitDepths);                   // Границы разделения CSM
 
 private:
     void BuildGeometryPassPSO(ID3D12Device* device, DXGI_FORMAT depthStencilFormat);
     void BuildLightingPassPSO(ID3D12Device* device, DXGI_FORMAT backBufferFormat,
         DXGI_FORMAT depthStencilFormat);
     void BuildTessellationPSO(ID3D12Device* device, DXGI_FORMAT depthStencilFormat);
-    void BuildShadowPassPSO(ID3D12Device* device, DXGI_FORMAT depthStencilFormat);
+    void BuildShadowPSO(ID3D12Device* device);
     void BuildRootSignatures(ID3D12Device* device);
     void BuildFullscreenQuad(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList);
-    void BuildShadowMaps(ID3D12Device* device, UINT shadowSrvOffset);
 
     GBuffer mGBuffer;
 
-    // Root signatures
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mGeometryRootSig;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mLightingRootSig;
-    Microsoft::WRL::ComPtr<ID3D12RootSignature> mTessRootSig;     // для тесселяционного прохода
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> mTessRootSig;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mShadowRootSig;
 
-    // Pipeline states
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometryPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mLightingPSO;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> mTessPSO;         // с HS + DS
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mTessPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mShadowPSO;
 
-    // Shaders
     Microsoft::WRL::ComPtr<ID3DBlob> mGeomVS, mGeomPS;
     Microsoft::WRL::ComPtr<ID3DBlob> mLightVS, mLightPS;
     Microsoft::WRL::ComPtr<ID3DBlob> mTessVS, mTessHS, mTessDS, mTessPS;
     Microsoft::WRL::ComPtr<ID3DBlob> mShadowVS;
 
-    // Constant buffers
     std::unique_ptr<UploadBuffer<GeometryPassConstants>>  mGeomCB;
     std::unique_ptr<UploadBuffer<LightingPassConstants>>  mLightCB;
     std::unique_ptr<UploadBuffer<TessellationConstants>>  mTessCB;
+    std::unique_ptr<UploadBuffer<ShadowPassConstants>>    mShadowCB;
+
     UINT mGeomCBByteSize = 0;
+    UINT mShadowCBByteSize = 0;
     static const UINT kMaxGeometryCBs = 4096;
     static const UINT kMaxTessCBs = 512;
 
     std::vector<LightData> mLights;
 
-    // Fullscreen quad
     Microsoft::WRL::ComPtr<ID3D12Resource> mQuadVB;
     Microsoft::WRL::ComPtr<ID3D12Resource> mQuadVBUploader;
     D3D12_VERTEX_BUFFER_VIEW               mQuadVBView = {};
 
     ID3D12DescriptorHeap* mSrvHeap = nullptr;
     UINT                  mGbufferSrvOffset = 0;
-    UINT                  mShadowSrvOffset = 0;
-    UINT                  mSrvDescriptorSize = 0;
-    UINT                  mDsvDescriptorSize = 0;
-
-    Microsoft::WRL::ComPtr<ID3D12Resource> mShadowMap = nullptr;
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mShadowDsvHeap = nullptr;
-    D3D12_VIEWPORT mShadowViewport = {};
-    D3D12_RECT     mShadowScissorRect = {};
-    static const UINT kShadowMapSize = kPublicShadowMapSize;
 
     DXGI_FORMAT mBackBufferFormat = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT mDepthStencilFormat = DXGI_FORMAT_UNKNOWN;

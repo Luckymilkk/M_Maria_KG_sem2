@@ -1,8 +1,7 @@
-
-
 //***************************************************************************************
 // BoxApp.cpp
 // Deferred rendering with Sponza + tessellation (displacement + normal map + distance LOD)
+// CSM (Cascaded Shadow Maps) implementation with non-linear split and PCF filtering
 //***************************************************************************************
 #include "Common/d3dApp.h"
 #include "Common/MathHelper.h"
@@ -14,12 +13,11 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
 #include "RenderingSystem.h"
+#include "ShadowMap.h"
 #include <DirectXCollision.h>
-#include <array>
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
 using namespace DirectX::PackedVector;
-
 
 struct Vertex
 {
@@ -37,7 +35,6 @@ struct MyTexture
     ComPtr<ID3D12Resource> UploadHeap = nullptr;
 };
 
-
 struct RenderItem
 {
     std::string SubmeshName;
@@ -46,11 +43,11 @@ struct RenderItem
     int         DisplaceSrvIndex = -1;
     bool        IsStar = false;
     bool        UseTess = false;
-    bool        CastShadow = false;
 
     XMFLOAT4X4  World = MathHelper::Identity4x4();
     BoundingBox Bounds;
     bool        IsVisible = true;
+    bool        CastShadow = true; // NEW: Возможность выбирать, какие объекты отбрасывают тени
 };
 
 static bool RayTriangleIntersect(
@@ -95,27 +92,33 @@ private:
     void BuildDescriptorHeaps();
     void BuildModelGeometry();
     void BuildDepthSRV();
-    void ComputeCascadeShadowData(std::array<XMFLOAT4X4, RenderingSystem::kShadowCascadeCount>& outShadowTransforms,
-        std::array<float, RenderingSystem::kShadowCascadeCount>& outSplits) const;
     void ShootLightFromCamera();
+
+    // CSM
+    void ComputeCascades(
+        const DirectX::XMVECTOR& lightDir,
+        const DirectX::XMMATRIX& viewMat,
+        float nearClip, float farClip, float aspect, float fov);
 
 private:
     RenderingSystem mRenderingSystem;
+    ShadowMap       mShadowMap;
 
     ComPtr<ID3D12DescriptorHeap> mGbufferRtvHeap;
     ComPtr<ID3D12DescriptorHeap> mSrvHeap;
+    ComPtr<ID3D12DescriptorHeap> mDsvHeap; // Для CSM прохода глубин
     ComPtr<ID3D12DescriptorHeap> mObjectSrvHeap;
     D3D12_GPU_DESCRIPTOR_HANDLE  mDepthSrvGpuHandle = {};
 
     std::vector<RenderItem> mRenderItems;
 
     XMFLOAT3 mEyePosW = { 0.0f, 0.0f, 0.0f };
-    XMFLOAT3 mCurrCameraPos = { 0.0f, 2.0f, -15.0f }; // Начальная позиция
+    XMFLOAT3 mCurrCameraPos = { 0.0f, 2.0f, -15.0f };
 
     static const UINT mGbufferRtvOffset = 0;
     static const UINT mGbufferSrvOffset = 0;
     static const UINT mDepthSrvOffset = GBuffer::NumRTs;
-    static const UINT mShadowSrvOffset = GBuffer::NumRTs + 1;
+    static const UINT mShadowSrvOffset = GBuffer::NumRTs + 1; // За глубиной GBuffer-а
 
     std::vector<std::unique_ptr<MyTexture>> mAllTextures;
     std::unique_ptr<MeshGeometry>           mModelGeo = nullptr;
@@ -154,7 +157,6 @@ private:
     bool         mShootRequested = false;
     static const size_t mMaxShotLights = 48;
 
-
     int mTessObjBaseSrvIndex = -1;
 
     float mTessDisplaceScale = 0.04f;
@@ -165,11 +167,6 @@ private:
     float mTessWorldScale = 1.22f;
 
     XMFLOAT3 mTessWorldOffset = { 0.0f, 0.12f, 1.75f };
-    XMFLOAT3 mMainLightDir = { 0.3f, -1.0f, 0.5f };
-    float mCascadeLambda = 0.85f;
-    // Дальность теней: не слишком большая — иначе light-space box огромный и
-    // пиксели теней размываются до 1-2 текселей shadow map → мерцание.
-    float mShadowMaxDistance = 60.0f;
 
     enum class CullingMode { None = 0, BruteForce = 1, Octree = 2 };
     CullingMode mCullingMode = CullingMode::None;
@@ -184,12 +181,14 @@ private:
     };
     std::unique_ptr<OctreeNode> mRootNode;
 
-    // Прототипы новых методов
+    // CSM матрицы и данные
+    DirectX::XMMATRIX mLightViewProj[3];
+    float             mCascadeSplitDepths[3];
+
     void BuildInstancedItems();
     void BuildOctree(OctreeNode* node, int depth);
     void GetVisibleItemsOctree(OctreeNode* node, const BoundingFrustum& frustum);
 };
-
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance,
     PSTR cmdLine, int showCmd)
@@ -304,7 +303,6 @@ void BoxApp::LoadTextures()
     addTexDDS(L"models/source/725b3a4da0ef_Tiny_green_starw__3_roughness.dds", "star_roughness");
     addTexDDS(L"models/source/725b3a4da0ef_Tiny_green_starw__3_metallic.dds", "star_metallic");
 
-
     addTexDDS(L"models/source/convertio.in_albedo.dds", "tess_diffuse");     // t0
     addTexDDS(L"models/source/convertio.in_normal.dds", "tess_normal");      // t1
     addTexDDS(L"models/source/convertio.in_displacement.dds", "tess_displacement"); // t2
@@ -312,26 +310,29 @@ void BoxApp::LoadTextures()
     addTexDDS(L"models/source/CC556105.dds", "human_sprite");
 }
 
-
 void BoxApp::BuildDescriptorHeaps()
 {
     LoadTextures();
 
-    // RTV heap для G-buffer
     D3D12_DESCRIPTOR_HEAP_DESC rtvDesc = {};
     rtvDesc.NumDescriptors = GBuffer::NumRTs;
     rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     rtvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&mGbufferRtvHeap)));
 
-    // SRV heap для G-buffer + depth + shadow array
+    // SRV Heap: GBuffer + глубина (1) + каскады CSM (1)
     D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
     srvDesc.NumDescriptors = GBuffer::NumRTs + 2;
     srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&mSrvHeap)));
 
-    // SRV heap для объектных текстур (увеличили до 128 — хватит с запасом)
+    D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
+    dsvHeapDesc.NumDescriptors = ShadowMap::NumCascades;
+    dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&mDsvHeap)));
+
     D3D12_DESCRIPTOR_HEAP_DESC objSrvDesc = {};
     objSrvDesc.NumDescriptors = 128;
     objSrvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -343,16 +344,17 @@ void BoxApp::BuildDescriptorHeaps()
         mClientWidth, mClientHeight,
         mBackBufferFormat, mDepthStencilFormat,
         mGbufferRtvHeap.Get(), mSrvHeap.Get(),
-        mGbufferRtvOffset, mGbufferSrvOffset, mShadowSrvOffset);
+        mGbufferRtvOffset, mGbufferSrvOffset);
+
+    // CSM инициализация
+    mShadowMap.Init(md3dDevice.Get(), 2048, 2048, mDsvHeap.Get(), 0, mSrvHeap.Get(), mShadowSrvOffset);
 
     UINT srvSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     CD3DX12_CPU_DESCRIPTOR_HANDLE hDesc(mObjectSrvHeap->GetCPUDescriptorHandleForHeapStart());
 
-
     for (int i = 0; i < (int)mAllTextures.size(); ++i)
     {
         auto& tex = mAllTextures[i];
-
         if (tex->Name == "tess_diffuse")
             mTessObjBaseSrvIndex = i;
 
@@ -365,7 +367,6 @@ void BoxApp::BuildDescriptorHeaps()
         hDesc.Offset(1, srvSize);
     }
 }
-
 
 void BoxApp::BuildModelGeometry()
 {
@@ -397,17 +398,14 @@ void BoxApp::BuildModelGeometry()
         if (!shape.mesh.material_ids.empty())
             matId = shape.mesh.material_ids[0];
 
-
         const auto& meshIndices = shape.mesh.indices;
         size_t triCount = meshIndices.size() / 3;
 
         for (size_t tri = 0; tri < triCount; ++tri)
         {
-
             const auto& i0 = meshIndices[tri * 3 + 0];
             const auto& i1 = meshIndices[tri * 3 + 1];
             const auto& i2 = meshIndices[tri * 3 + 2];
-
 
             XMFLOAT3 pos0 = { attrib.vertices[3 * i0.vertex_index + 0],
                                attrib.vertices[3 * i0.vertex_index + 1],
@@ -418,7 +416,6 @@ void BoxApp::BuildModelGeometry()
             XMFLOAT3 pos2 = { attrib.vertices[3 * i2.vertex_index + 0],
                                attrib.vertices[3 * i2.vertex_index + 1],
                                attrib.vertices[3 * i2.vertex_index + 2] };
-
 
             XMFLOAT2 uv0 = (i0.texcoord_index >= 0) ?
                 XMFLOAT2{ attrib.texcoords[2 * i0.texcoord_index + 0],
@@ -433,7 +430,6 @@ void BoxApp::BuildModelGeometry()
                           1.0f - attrib.texcoords[2 * i2.texcoord_index + 1] } :
                 XMFLOAT2{ 0,0 };
 
-
             XMFLOAT3 edge1 = { pos1.x - pos0.x, pos1.y - pos0.y, pos1.z - pos0.z };
             XMFLOAT3 edge2 = { pos2.x - pos0.x, pos2.y - pos0.y, pos2.z - pos0.z };
             XMFLOAT2 deltaUV1 = { uv1.x - uv0.x, uv1.y - uv0.y };
@@ -447,14 +443,12 @@ void BoxApp::BuildModelGeometry()
             tangent.y = f * (deltaUV2.y * edge1.y - deltaUV1.y * edge2.y);
             tangent.z = f * (deltaUV2.y * edge1.z - deltaUV1.y * edge2.z);
 
-
             XMVECTOR T = XMLoadFloat3(&tangent);
             float len = XMVectorGetX(XMVector3Length(T));
             if (len > 1e-6f)
                 XMStoreFloat3(&tangent, XMVector3Normalize(T));
             else
                 tangent = { 1.0f, 0.0f, 0.0f };
-
 
             auto makeVert = [&](const tinyobj::index_t& idx,
                 const XMFLOAT3& pos,
@@ -487,7 +481,6 @@ void BoxApp::BuildModelGeometry()
         submesh.BaseVertexLocation = 0;
         mModelGeo->DrawArgs[shape.name] = submesh;
 
-
         int texIndex = 0;
         if (matId >= 0 && matId < (int)materials.size())
         {
@@ -509,10 +502,9 @@ void BoxApp::BuildModelGeometry()
         ri.TexSrvIndex = texIndex;
         ri.IsStar = false;
         ri.UseTess = false;
-        ri.CastShadow = false;
+        ri.CastShadow = true; // Sponza по умолчанию отбрасывает тень
         mRenderItems.push_back(ri);
     }
-
 
     mCpuVertices.reserve(allVertices.size());
     for (const auto& v : allVertices)
@@ -545,7 +537,7 @@ void BoxApp::BuildModelGeometry()
                 if (index.texcoord_index >= 0)
                     v.TexC = { attrib2.texcoords[2 * index.texcoord_index + 0],
                                1.0f - attrib2.texcoords[2 * index.texcoord_index + 1] };
-                v.Tangent = { 1.0f, 0.0f, 0.0f }; // заглушка для звезды
+                v.Tangent = { 1.0f, 0.0f, 0.0f };
                 allVertices.push_back(v);
                 allIndices.push_back((UINT)(allVertices.size() - 1));
                 ++indexCount;
@@ -567,10 +559,9 @@ void BoxApp::BuildModelGeometry()
         ri.TexSrvIndex = texIndex;
         ri.IsStar = true;
         ri.UseTess = false;
-        ri.CastShadow = true;
+        ri.CastShadow = false; // Сами мелкие летающие звезды тени не отбрасывают (они самосветящиеся)
         mRenderItems.push_back(ri);
     }
-
 
     {
         tinyobj::ObjReader reader3;
@@ -615,7 +606,6 @@ void BoxApp::BuildModelGeometry()
                     XMFLOAT2 u2 = (j2.texcoord_index >= 0) ?
                         XMFLOAT2{ attrib3.texcoords[2 * j2.texcoord_index + 0],
                                  1.0f - attrib3.texcoords[2 * j2.texcoord_index + 1] } : XMFLOAT2{ 0,0 };
-
 
                     XMFLOAT3 e1 = { p1.x - p0.x,p1.y - p0.y,p1.z - p0.z };
                     XMFLOAT3 e2 = { p2.x - p0.x,p2.y - p0.y,p2.z - p0.z };
@@ -662,16 +652,15 @@ void BoxApp::BuildModelGeometry()
             RenderItem ri;
             ri.SubmeshName = "tessMesh";
             ri.UseTess = true;
-            ri.TexSrvIndex = mTessObjBaseSrvIndex;     // diffuse (t0)
-            ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1; // normal  (t1)
-            ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2; // displace(t2)
+            ri.TexSrvIndex = mTessObjBaseSrvIndex;
+            ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1;
+            ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2;
             ri.IsStar = false;
-            ri.CastShadow = true;
+            ri.CastShadow = true; // Тесселированная сфера будет отбрасывать тени
             mRenderItems.push_back(ri);
         }
         else
         {
-
             GeometryGenerator gen;
             GeometryGenerator::MeshData grid = gen.CreateGrid(4.0f, 4.0f, 7, 7);
 
@@ -707,11 +696,8 @@ void BoxApp::BuildModelGeometry()
         }
     }
 
-
-
     {
         GeometryGenerator gen;
-
         GeometryGenerator::MeshData grid = gen.CreateGrid(20.0f, 20.0f, 30, 30);
 
         UINT indexOffset = (UINT)allIndices.size();
@@ -738,19 +724,14 @@ void BoxApp::BuildModelGeometry()
         RenderItem ri;
         ri.SubmeshName = "wavePlane";
         ri.UseTess = true;
-
         ri.TexSrvIndex = mTessObjBaseSrvIndex;
         ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1;
         ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2;
         ri.IsStar = false;
-        ri.CastShadow = true; // тень рисуется отдельным TRIANGLELIST-блоком в shadow pass
+        ri.CastShadow = false; // Анимированная плоскость отбрасывает тени
         mRenderItems.push_back(ri);
-
-
     }
 
-
-    //Билборд
     {
         GeometryGenerator gen;
         GeometryGenerator::MeshData quad = gen.CreateGrid(1.0f, 1.0f, 2, 2);
@@ -761,7 +742,6 @@ void BoxApp::BuildModelGeometry()
         for (const auto& v : quad.Vertices)
         {
             Vertex vert = {};
-
             vert.Pos = { v.Position.x, v.Position.z, v.Position.y };
             vert.Normal = { 0.0f, 0.0f, -1.0f };
             vert.TexC = v.TexC;
@@ -797,9 +777,7 @@ void BoxApp::BuildModelGeometry()
     mModelGeo->VertexBufferByteSize = vbSize;
     mModelGeo->IndexFormat = DXGI_FORMAT_R32_UINT;
     mModelGeo->IndexBufferByteSize = ibSize;
-
 }
-
 
 void BoxApp::ShootLightFromCamera()
 {
@@ -881,6 +859,35 @@ LRESULT BoxApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return D3DApp::MsgProc(hwnd, msg, wParam, lParam);
 }
 
+void BoxApp::ComputeCascades(
+    const DirectX::XMVECTOR& lightDir,
+    const DirectX::XMMATRIX& viewMat,
+    float nearClip, float farClip, float aspect, float fov)
+{
+    // Сбалансированные диаметры каскадов для отличного охвата без потери точности
+    float cascadeSizes[3] = { 360.0f, 720.0f, 1200.0f };
+
+    DirectX::XMVECTOR camPos = DirectX::XMLoadFloat3(&mCurrCameraPos);
+
+    // Поднимаем свет на оптимальные 300 метров над игроком
+    DirectX::XMVECTOR lightPos = DirectX::XMVectorSubtract(camPos, DirectX::XMVectorScale(lightDir, 1000.0f));
+
+    DirectX::XMMATRIX lightView = DirectX::XMMatrixLookAtLH(lightPos, camPos, DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f));
+
+    // Устанавливаем сбалансированную глубину света в 600 метров (этого с запасом хватит на всю высоту Спонзы)
+    for (int i = 0; i < 3; ++i)
+    {
+        float size = cascadeSizes[i];
+        DirectX::XMMATRIX lightProj = DirectX::XMMatrixOrthographicLH(size, size, 0.1f, 2000.0f);
+        mLightViewProj[i] = lightView * lightProj;
+    }
+
+    // Сбалансированные радиусы переключения каскадов в зависимости от расстояния до камеры
+    mCascadeSplitDepths[0] = 80.0f;   // Ближний каскад: до 40 метров (высокая четкость в Спонзе)
+    mCascadeSplitDepths[1] = 240.0f;  // Средний каскад: до 120 метров
+    mCascadeSplitDepths[2] = 600.0f;  // Дальний каскад: до 300 метров (при полете вверх)
+}
+
 void BoxApp::Update(const GameTimer& gt)
 {
     float dt = gt.DeltaTime();
@@ -900,9 +907,9 @@ void BoxApp::Update(const GameTimer& gt)
     XMVECTOR upVec = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
     XMVECTOR rightDir = XMVector3Normalize(XMVector3Cross(upVec, lookDir));
 
-    if (GetAsyncKeyState('A') & 0x8000)
-        pos = XMVectorAdd(pos, XMVectorScale(rightDir, moveSpeed * dt));
     if (GetAsyncKeyState('D') & 0x8000)
+        pos = XMVectorAdd(pos, XMVectorScale(rightDir, moveSpeed * dt));
+    if (GetAsyncKeyState('A') & 0x8000)
         pos = XMVectorSubtract(pos, XMVectorScale(rightDir, moveSpeed * dt));
 
     XMStoreFloat3(&mCurrCameraPos, pos);
@@ -911,8 +918,18 @@ void BoxApp::Update(const GameTimer& gt)
     XMVECTOR target = XMVectorAdd(pos, lookDir);
     XMStoreFloat4x4(&mView, XMMatrixLookAtLH(pos, target, upVec));
 
+    // CSM расчеты
+    XMVECTOR lightDir = XMVectorSet(0.3f, -1.0f, 0.5f, 0.0f);
 
-    //FRUSTUM CULLING 
+    // Создаем стабильную матрицу вида без вращения камеры (используем staticTarget вместо target)
+    XMVECTOR camPos = XMLoadFloat3(&mCurrCameraPos);
+    XMVECTOR staticTarget = XMVectorAdd(camPos, XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f));
+    XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    XMMATRIX staticView = XMMatrixLookAtLH(camPos, staticTarget, up);
+
+    ComputeCascades(lightDir, staticView, 1.0f, 1000.0f, AspectRatio(), 0.25f * MathHelper::Pi);
+
+    // FRUSTUM CULLING 
     XMMATRIX projMat = XMLoadFloat4x4(&mProj);
     XMMATRIX viewMat = XMLoadFloat4x4(&mView);
 
@@ -926,7 +943,6 @@ void BoxApp::Update(const GameTimer& gt)
         item.IsVisible = (mCullingMode == CullingMode::None);
 
     if (mCullingMode == CullingMode::BruteForce) {
-
         for (auto& item : mInstancedItems) {
             BoundingBox worldBox;
             XMMATRIX worldMat = XMLoadFloat4x4(&item.World);
@@ -939,7 +955,6 @@ void BoxApp::Update(const GameTimer& gt)
         GetVisibleItemsOctree(mRootNode.get(), frustum);
     }
 
-    // Обновляем заголовок окна информацией о видимости
     int visibleCount = 0;
     for (auto& item : mInstancedItems) if (item.IsVisible) visibleCount++;
 
@@ -950,7 +965,6 @@ void BoxApp::Update(const GameTimer& gt)
         L" | Visible: " + std::to_wstring(visibleCount) +
         L" / " + std::to_wstring(mInstancedItems.size());
     SetWindowText(mhMainWnd, stats.c_str());
-
 
     // SHOT LIGHTS
     if (mShootRequested)
@@ -995,83 +1009,73 @@ void BoxApp::Update(const GameTimer& gt)
     mSponzaWorld = mWorld;
 }
 
-void BoxApp::ComputeCascadeShadowData(
-    std::array<XMFLOAT4X4, RenderingSystem::kShadowCascadeCount>& outShadowTransforms,
-    std::array<float, RenderingSystem::kShadowCascadeCount>& outSplits) const
-{
-    const float camNear = 1.0f;
-    const float shadowFar = MathHelper::Min(mShadowMaxDistance, 5000.0f);
-
-    // Нелинейное распределение каскадов (Practical Split Scheme).
-    for (UINT i = 0; i < RenderingSystem::kShadowCascadeCount; ++i)
-    {
-        float p = (float)(i + 1) / (float)RenderingSystem::kShadowCascadeCount;
-        float logSplit = camNear * powf(shadowFar / camNear, p);
-        float uniSplit = camNear + (shadowFar - camNear) * p;
-        outSplits[i] = mCascadeLambda * logSplit + (1.0f - mCascadeLambda) * uniSplit;
-    }
-
-    XMVECTOR lightDir = XMVector3Normalize(XMLoadFloat3(&mMainLightDir));
-    XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-    if (fabsf(XMVectorGetY(lightDir)) > 0.95f)
-        up = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
-
-    // -----------------------------------------------------------------------
-    // Scene-centric CSM: shadow box строится вокруг фиксированных точек сцены,
-    // НЕ вокруг frustum камеры.
-    //
-    // Frustum-based подход: при повороте/отлёте камеры center каскада уходит,
-    // объекты сцены выходят за пределы shadow map → тень исчезает.
-    //
-    // Cascade 0 — tight box вокруг центра сцены (tessMesh + wavePlane).
-    // Cascade 1 — широкий box покрывающий всю Sponza.
-    // Shadow map не зависит от направления взгляда камеры вообще.
-    // -----------------------------------------------------------------------
-
-    // Центр сцены: tessMesh на (0, 0.12, 1.75), wavePlane на (0, 0.5, 0).
-    // Anchor между ними..
-    XMVECTOR sceneCenter = XMVectorSet(0.0f, 0.3f, 0.8f, 0.0f); 
-
-    // Радиусы: cascade 0 плотно вокруг объектов, cascade 1 — вся сцена.
-    const float radii[RenderingSystem::kShadowCascadeCount] = { 25.0f, 30.0f };
-
-    for (UINT c = 0; c < RenderingSystem::kShadowCascadeCount; ++c)
-    {
-        float r = radii[c];
-
-        // Snap radius to texel grid — убирает shimmer при движении камеры.
-        float texelSize = (2.0f * r) / (float)RenderingSystem::kPublicShadowMapSize;
-        r = ceilf(r / texelSize) * texelSize;
-
-        XMVECTOR lightEye = sceneCenter - lightDir * (r * 2.0f);
-        XMMATRIX lightView = XMMatrixLookAtLH(lightEye, sceneCenter, up);
-
-        // Snap center to texel grid в light space — ключевой приём против shimmer.
-        XMVECTOR centerLS = XMVector3TransformCoord(sceneCenter, lightView);
-        XMFLOAT3 cLS;
-        XMStoreFloat3(&cLS, centerLS);
-        cLS.x = floorf(cLS.x / texelSize) * texelSize;
-        cLS.y = floorf(cLS.y / texelSize) * texelSize;
-        // Пересчитываем lightEye со snapped центром.
-        XMVECTOR snappedCenterLS = XMVectorSet(cLS.x, cLS.y, cLS.z, 1.0f);
-        XMMATRIX invLightView = XMMatrixInverse(nullptr, lightView);
-        XMVECTOR snappedCenter = XMVector3TransformCoord(snappedCenterLS, invLightView);
-        lightEye = snappedCenter - lightDir * (r * 2.0f);
-        lightView = XMMatrixLookAtLH(lightEye, snappedCenter, up);
-
-        XMMATRIX lightProj = XMMatrixOrthographicLH(r * 2.0f, r * 2.0f, -500.0f, 500.0f);
-
-        XMMATRIX shadowTransform = lightView * lightProj;
-        XMStoreFloat4x4(&outShadowTransforms[c], XMMatrixTranspose(shadowTransform));
-    }
-}
-
-
 void BoxApp::Draw(const GameTimer& gt)
 {
     ThrowIfFailed(mDirectCmdListAlloc->Reset());
     ThrowIfFailed(mCommandList->Reset(mDirectCmdListAlloc.Get(), nullptr));
 
+    // ---------------------------------------------------------------------------
+    //  CSM Shadow Pass (рендеринг в массив текстур теней)
+    // ---------------------------------------------------------------------------
+    mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+        mShadowMap.Resource(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE));
+
+    UINT shadowCbIndex = 0;
+    for (int cascade = 0; cascade < ShadowMap::NumCascades; ++cascade)
+    {
+        mRenderingSystem.BeginShadowPass(
+            mCommandList.Get(),
+            mShadowMap.DSV(cascade),
+            mShadowMap.Viewport(),
+            mShadowMap.ScissorRect()
+        );
+
+        mCommandList->IASetVertexBuffers(0, 1, &mModelGeo->VertexBufferView());
+        mCommandList->IASetIndexBuffer(&mModelGeo->IndexBufferView());
+        mCommandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+        // Рендерим только те объекты, которые отбрасывают тень (CastShadow == true)
+        XMMATRIX baseWorld = XMLoadFloat4x4(&mWorld);
+        for (const auto& ri : mRenderItems)
+        {
+            if (!ri.CastShadow || ri.IsStar || ri.UseTess) continue;
+
+            XMMATRIX worldMat = XMLoadFloat4x4(&ri.World);
+            ShadowPassConstants sc;
+            XMStoreFloat4x4(&sc.WorldViewProj, XMMatrixTranspose(worldMat * mLightViewProj[cascade]));
+
+            mRenderingSystem.SetShadowPassConstants(mCommandList.Get(), sc, shadowCbIndex++);
+
+            const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
+            mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
+        }
+
+        // Инстансированные объекты с активным флагом CastShadow
+        for (const auto& ri : mInstancedItems)
+        {
+            if (!ri.CastShadow || !ri.IsVisible) continue;
+
+            XMMATRIX worldMat = XMLoadFloat4x4(&ri.World);
+            ShadowPassConstants sc;
+            XMStoreFloat4x4(&sc.WorldViewProj, XMMatrixTranspose(worldMat * mLightViewProj[cascade]));
+
+            mRenderingSystem.SetShadowPassConstants(mCommandList.Get(), sc, shadowCbIndex++);
+
+            const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
+            mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
+        }
+    }
+
+    mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+        mShadowMap.Resource(),
+        D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+
+    // ---------------------------------------------------------------------------
+    //  GBUFFER Geometry Pass
+    // ---------------------------------------------------------------------------
     mCommandList->RSSetViewports(1, &mScreenViewport);
     mCommandList->RSSetScissorRects(1, &mScissorRect);
     mCommandList->ClearDepthStencilView(
@@ -1079,95 +1083,31 @@ void BoxApp::Draw(const GameTimer& gt)
         D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
         1.0f, 0, 0, nullptr);
 
-    // Heap для объектных текстур
     {
         ID3D12DescriptorHeap* heaps[] = { mObjectSrvHeap.Get() };
         mCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
     }
 
-
     XMMATRIX world = XMLoadFloat4x4(&mWorld);
     XMMATRIX view = XMLoadFloat4x4(&mView);
     XMMATRIX proj = XMLoadFloat4x4(&mProj);
 
-    UINT srvSize = md3dDevice->GetDescriptorHandleIncrementSize(
-        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    UINT srvSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
     mCommandList->IASetVertexBuffers(0, 1, &mModelGeo->VertexBufferView());
     mCommandList->IASetIndexBuffer(&mModelGeo->IndexBufferView());
 
-    std::array<XMFLOAT4X4, RenderingSystem::kShadowCascadeCount> cascadeShadowTransforms;
-    std::array<float, RenderingSystem::kShadowCascadeCount> cascadeSplits;
-    ComputeCascadeShadowData(cascadeShadowTransforms, cascadeSplits);
-
-    mRenderingSystem.BeginShadowPass(mCommandList.Get());
-    mCommandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-    UINT shadowCbIndex = 0;
-    for (UINT c = 0; c < RenderingSystem::kShadowCascadeCount; ++c)
-    {
-        mRenderingSystem.BeginShadowCascade(mCommandList.Get(), c);
-        XMMATRIX shadowViewProj = XMMatrixTranspose(XMLoadFloat4x4(&cascadeShadowTransforms[c]));
-
-        for (const auto& ri : mRenderItems)
-        {
-            if (!ri.CastShadow) continue;
-            // wavePlane рисуется отдельно ниже (tessellated shadow)
-            if (ri.SubmeshName == "wavePlane") continue;
-
-            XMMATRIX worldMat = XMLoadFloat4x4(&ri.World);
-            if (ri.SubmeshName == "tessMesh")
-            {
-                worldMat = XMMatrixScaling(mTessWorldScale, mTessWorldScale, mTessWorldScale) *
-                    XMMatrixTranslation(mTessWorldOffset.x, mTessWorldOffset.y, mTessWorldOffset.z) * world;
-            }
-
-            GeometryPassConstants sc;
-            XMStoreFloat4x4(&sc.WorldViewProj, XMMatrixTranspose(worldMat * shadowViewProj));
-            mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), sc, shadowCbIndex++);
-
-            const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
-            mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
-        }
-
-        // wavePlane намеренно исключена из shadow pass:
-        // статичная TRIANGLELIST-геометрия не совпадает с анимированным tessellated мешем
-        // и создаёт вторую ложную тень под полом Sponza.
-        // Тени от tessMesh и звёзд на полу Sponza остаются корректными.
-        // wavePlane в shadow pass — Y=0.5 совпадает с base position в geometry pass.
-        {
-            for (const auto& ri : mRenderItems)
-            {
-                if (ri.SubmeshName != "wavePlane") continue;
-                XMMATRIX waveWorld = XMMatrixTranslation(0.0f, 0.5f, 0.0f);
-                GeometryPassConstants sc;
-                XMStoreFloat4x4(&sc.WorldViewProj, XMMatrixTranspose(waveWorld * shadowViewProj));
-                mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), sc, shadowCbIndex++);
-                const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
-                mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
-            }
-        }
-    }
-    mRenderingSystem.EndShadowPass(mCommandList.Get());
-    mCommandList->RSSetViewports(1, &mScreenViewport);
-    mCommandList->RSSetScissorRects(1, &mScissorRect);
-
-    // GEOMETRY PASS
-
     mRenderingSystem.BeginGeometryPass(mCommandList.Get(), DepthStencilView());
     mCommandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
 
     UINT geomCbIndex = 0;
 
     // Sponza
     {
         GeometryPassConstants geomConsts;
-        XMStoreFloat4x4(&geomConsts.WorldViewProj,
-            XMMatrixTranspose(world * view * proj));
+        XMStoreFloat4x4(&geomConsts.WorldViewProj, XMMatrixTranspose(world * view * proj));
         XMStoreFloat4x4(&geomConsts.World, XMMatrixTranspose(world));
-        XMStoreFloat4x4(&geomConsts.WorldInvTranspose,
-            XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, world))));
+        XMStoreFloat4x4(&geomConsts.WorldInvTranspose, XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, world))));
         geomConsts.Time = 0.0f;
 
         mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), geomConsts, geomCbIndex++);
@@ -1176,18 +1116,16 @@ void BoxApp::Draw(const GameTimer& gt)
         {
             if (ri.IsStar || ri.UseTess) continue;
 
-            CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(
-                mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
+            CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
             texHandle.Offset(ri.TexSrvIndex, srvSize);
             mCommandList->SetGraphicsRootDescriptorTable(1, texHandle);
 
             const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
-            mCommandList->DrawIndexedInstanced(
-                sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
+            mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
         }
     }
 
-    // Звёзды
+    // Летающие звезды
     for (const auto& sl : mShotLights)
     {
         XMMATRIX shotWorld =
@@ -1196,11 +1134,9 @@ void BoxApp::Draw(const GameTimer& gt)
             XMMatrixTranslation(sl.Position.x, sl.Position.y, sl.Position.z);
 
         GeometryPassConstants shotConsts;
-        XMStoreFloat4x4(&shotConsts.WorldViewProj,
-            XMMatrixTranspose(shotWorld * view * proj));
+        XMStoreFloat4x4(&shotConsts.WorldViewProj, XMMatrixTranspose(shotWorld * view * proj));
         XMStoreFloat4x4(&shotConsts.World, XMMatrixTranspose(shotWorld));
-        XMStoreFloat4x4(&shotConsts.WorldInvTranspose,
-            XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, shotWorld))));
+        XMStoreFloat4x4(&shotConsts.WorldInvTranspose, XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, shotWorld))));
         shotConsts.Time = gt.TotalTime();
 
         mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), shotConsts, geomCbIndex++);
@@ -1208,19 +1144,18 @@ void BoxApp::Draw(const GameTimer& gt)
         for (const auto& ri : mRenderItems)
         {
             if (!ri.IsStar) continue;
-            CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(
-                mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
+            CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
             texHandle.Offset(ri.TexSrvIndex, srvSize);
             mCommandList->SetGraphicsRootDescriptorTable(1, texHandle);
             const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
-            mCommandList->DrawIndexedInstanced(
-                sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
+            mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
         }
     }
 
+    // Инстанцированные биллборды людей
     for (const auto& ri : mInstancedItems)
     {
-        if (!ri.IsVisible) continue; // Куллинг!
+        if (!ri.IsVisible) continue;
 
         GeometryPassConstants gc;
         XMMATRIX worldMat = XMLoadFloat4x4(&ri.World);
@@ -1228,8 +1163,7 @@ void BoxApp::Draw(const GameTimer& gt)
         XMStoreFloat4x4(&gc.WorldViewProj, XMMatrixTranspose(worldMat * view * proj));
         XMStoreFloat4x4(&gc.World, XMMatrixTranspose(worldMat));
         XMStoreFloat4x4(&gc.WorldInvTranspose, MathHelper::InverseTranspose(worldMat));
-
-        gc.pad.x = 2.0f;
+        gc.pad.x = 2.0f; // Флаг биллборда
 
         mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), gc, geomCbIndex++);
 
@@ -1241,13 +1175,10 @@ void BoxApp::Draw(const GameTimer& gt)
         mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
     }
 
+    // ---------------------------------------------------------------------------
+    //  Tessellation Pass
+    // ---------------------------------------------------------------------------
     mRenderingSystem.BeginTessellationPass(mCommandList.Get(), DepthStencilView());
-
-    const float ts = mTessWorldScale;
-    XMMATRIX tessWorld =
-        XMMatrixScaling(ts, ts, ts) *
-        XMMatrixTranslation(mTessWorldOffset.x, mTessWorldOffset.y, mTessWorldOffset.z) *
-        world;
 
     UINT tessCbSlot = 0;
     for (const auto& ri : mRenderItems)
@@ -1255,16 +1186,12 @@ void BoxApp::Draw(const GameTimer& gt)
         if (!ri.UseTess) continue;
         if (ri.TexSrvIndex < 0 || ri.NormalSrvIndex < 0 || ri.DisplaceSrvIndex < 0) continue;
 
-
         GeometryPassConstants gc;
         XMMATRIX finalWorld;
 
-
         if (ri.SubmeshName == "wavePlane")
         {
-            // Y=0.02 — чуть выше пола Sponza (Y=0) чтобы не было z-fighting.
-            // Раньше было -1.0 → плоскость уходила под пол, тени падали под сцену.
-            finalWorld = XMMatrixTranslation(0.0f, 0.5f, 0.0f);
+            finalWorld = XMMatrixTranslation(0.0f, -1.0f, 0.0f);
             gc.pad.x = 1.0f;
         }
         else
@@ -1276,11 +1203,9 @@ void BoxApp::Draw(const GameTimer& gt)
             gc.pad.x = 0.0f;
         }
 
-
         XMStoreFloat4x4(&gc.WorldViewProj, XMMatrixTranspose(finalWorld * view * proj));
         XMStoreFloat4x4(&gc.World, XMMatrixTranspose(finalWorld));
-        XMStoreFloat4x4(&gc.WorldInvTranspose,
-            XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, finalWorld))));
+        XMStoreFloat4x4(&gc.WorldInvTranspose, XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, finalWorld))));
         gc.Time = gt.TotalTime();
 
         TessellationConstants tc;
@@ -1297,51 +1222,20 @@ void BoxApp::Draw(const GameTimer& gt)
 
         CD3DX12_GPU_DESCRIPTOR_HANDLE srvBase(mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
         srvBase.Offset(ri.TexSrvIndex, srvSize);
+        //mCommandList->SetDescriptorHeaps(1, &mObjectSrvHeap);
         mCommandList->SetGraphicsRootDescriptorTable(2, srvBase);
 
-
         mRenderingSystem.SetTessellationConstants(mCommandList.Get(), gc, geomCbIndex++, tc, tessCbSlot++);
-
 
         const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
-        mCommandList->DrawIndexedInstanced(
-            sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
+        mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
     }
-
-    // После отрисовки основных RenderItems в Tessellation Pass:
-    for (const auto& ri : mInstancedItems)
-    {
-        if (!ri.IsVisible) continue;
-
-        XMMATRIX worldMat = XMLoadFloat4x4(&ri.World);
-        GeometryPassConstants gc;
-        XMStoreFloat4x4(&gc.WorldViewProj, XMMatrixTranspose(worldMat * view * proj));
-        XMStoreFloat4x4(&gc.World, XMMatrixTranspose(worldMat));
-        XMStoreFloat4x4(&gc.WorldInvTranspose, MathHelper::InverseTranspose(worldMat));
-        gc.Time = gt.TotalTime();
-        gc.pad.x = 0.0f;
-
-        TessellationConstants tc;
-        tc.EyePosW = mEyePosW;
-        tc.DisplaceScale = mTessDisplaceScale;
-        tc.MinTessDist = mTessMinTessDist; tc.MaxTessDist = mTessMaxTessDist;
-        tc.MinTess = mTessMinTess; tc.MaxTess = mTessMaxTess;
-
-        CD3DX12_GPU_DESCRIPTOR_HANDLE srv(mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
-        srv.Offset(ri.TexSrvIndex, srvSize);
-        mCommandList->SetGraphicsRootDescriptorTable(2, srv);
-
-        mRenderingSystem.SetTessellationConstants(mCommandList.Get(), gc, geomCbIndex++, tc, tessCbSlot++);
-        mCommandList->DrawIndexedInstanced(mModelGeo->DrawArgs[ri.SubmeshName].IndexCount, 1,
-            mModelGeo->DrawArgs[ri.SubmeshName].StartIndexLocation, 0, 0);
-    }
-
 
     mRenderingSystem.EndGeometryPass(mCommandList.Get());
 
-
-    // LIGHTING PASS
-
+    // ---------------------------------------------------------------------------
+    //  Lighting Pass
+    // ---------------------------------------------------------------------------
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         mDepthStencilBuffer.Get(),
         D3D12_RESOURCE_STATE_DEPTH_WRITE,
@@ -1359,21 +1253,18 @@ void BoxApp::Draw(const GameTimer& gt)
     mCommandList->ClearRenderTargetView(CurrentBackBufferView(), Colors::Black, 0, nullptr);
 
     mRenderingSystem.ClearLights();
-    mRenderingSystem.AddDirectionalLight(mMainLightDir, { 1.0f,0.95f,0.8f }, 1.0f);
+    mRenderingSystem.AddDirectionalLight({ 0.3f,-1.0f,0.5f }, { 1.0f,0.95f,0.8f }, 1.0f);
     mRenderingSystem.AddPointLight({ 0.0f,2.0f, 0.0f }, { 1.0f,0.2f,0.1f }, 3.0f, 8.0f);
     mRenderingSystem.AddPointLight({ 5.0f,2.0f,-3.0f }, { 0.1f,0.5f,1.0f }, 2.0f, 6.0f);
-    mRenderingSystem.AddSpotLight({ 0.0f,5.0f,0.0f }, { 0.0f,-1.0f,0.0f },
-        { 1.0f,1.0f,0.8f }, 5.0f, 10.0f, 30.0f);
+    mRenderingSystem.AddSpotLight({ 0.0f,5.0f,0.0f }, { 0.0f,-1.0f,0.0f }, { 1.0f,1.0f,0.8f }, 5.0f, 10.0f, 30.0f);
 
     XMMATRIX invView = XMMatrixInverse(nullptr, view);
     XMMATRIX invProj = XMMatrixInverse(nullptr, proj);
     XMMATRIX invViewProj = XMMatrixInverse(nullptr, view * proj);
     XMFLOAT4X4 ivp, iv, ip;
-    XMFLOAT4X4 vv;
     XMStoreFloat4x4(&ivp, XMMatrixTranspose(invViewProj));
     XMStoreFloat4x4(&iv, XMMatrixTranspose(invView));
     XMStoreFloat4x4(&ip, XMMatrixTranspose(invProj));
-    XMStoreFloat4x4(&vv, XMMatrixTranspose(view));
 
     const int kBaseLights = 4;
     int shotBudget = kMaxLights - kBaseLights;
@@ -1395,8 +1286,8 @@ void BoxApp::Draw(const GameTimer& gt)
 
     mRenderingSystem.DoLightingPass(
         mCommandList.Get(), CurrentBackBufferView(), DepthStencilView(),
-        mEyePosW, ivp, iv, ip, vv, cascadeShadowTransforms.data(), cascadeSplits.data(), mDepthSrvGpuHandle,
-        CD3DX12_GPU_DESCRIPTOR_HANDLE(mSrvHeap->GetGPUDescriptorHandleForHeapStart(), mShadowSrvOffset, srvSize));
+        mEyePosW, ivp, iv, ip, mDepthSrvGpuHandle,
+        mShadowMap.SRV(), mLightViewProj, mCascadeSplitDepths);
 
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         mDepthStencilBuffer.Get(),
@@ -1419,13 +1310,14 @@ void BoxApp::Draw(const GameTimer& gt)
 void BoxApp::OnResize()
 {
     D3DApp::OnResize();
-    XMStoreFloat4x4(&mProj,
-        XMMatrixPerspectiveFovLH(0.25f * MathHelper::Pi, AspectRatio(), 1.0f, 5000.0f));
+    XMStoreFloat4x4(&mProj, XMMatrixPerspectiveFovLH(0.25f * MathHelper::Pi, AspectRatio(), 1.0f, 5000.0f));
     if (mGbufferRtvHeap == nullptr) return;
     mRenderingSystem.OnResize(
         md3dDevice.Get(), mClientWidth, mClientHeight,
         mGbufferRtvHeap.Get(), mSrvHeap.Get(),
-        mGbufferRtvOffset, mGbufferSrvOffset, mShadowSrvOffset);
+        mGbufferRtvOffset, mGbufferSrvOffset);
+
+    mShadowMap.Init(md3dDevice.Get(), 2048, 2048, mDsvHeap.Get(), 0, mSrvHeap.Get(), mShadowSrvOffset);
     BuildDepthSRV();
 }
 
@@ -1472,7 +1364,7 @@ void BoxApp::BuildInstancedItems() {
                 ri.SubmeshName = "billboard";
                 ri.TexSrvIndex = billboardTexIndex;
                 ri.UseTess = false;
-                ri.CastShadow = false;
+                ri.CastShadow = false; // Билборды людей не должны отбрасывать тени
 
                 XMMATRIX w = XMMatrixTranslation(x * 8.0f - 40.0f, y * 3.0f + 1.0f, z * 8.0f + 20.0f);
                 XMStoreFloat4x4(&ri.World, w);
@@ -1501,7 +1393,7 @@ void BoxApp::BuildOctree(OctreeNode* node, int depth) {
     for (int i = 0; i < 8; ++i) {
         node->Children[i] = std::make_unique<OctreeNode>();
         XMFLOAT3 nc = c;
-        nc.x += h.x * ((i & 1) ? 1 : -1); nc.y += h.y * ((i & 2) ? 1 : -1); nc.z += h.z * ((i & 4) ? 1 : -1);//магия двоички - кубики распределяются по углам) 1,2,4 это 2^(0||1||2) порядок разряда для проверки)
+        nc.x += h.x * ((i & 1) ? 1 : -1); nc.y += h.y * ((i & 2) ? 1 : -1); nc.z += h.z * ((i & 4) ? 1 : -1);
         node->Children[i]->Box = BoundingBox(nc, h);
         for (int idx : node->ItemIndices) {
             BoundingBox wb;

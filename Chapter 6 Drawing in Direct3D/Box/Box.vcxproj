@@ -159,6 +159,7 @@
     <ClCompile Include="Common\MathHelper.cpp" />
     <ClCompile Include="GBuffer.cpp" />
     <ClCompile Include="RenderingSystem.cpp" />
+    <ClCompile Include="ShadowMap.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\Common\UploadBuffer.h" />
@@ -174,6 +175,7 @@
     <ClInclude Include="Common\UploadBuffer.h" />
     <ClInclude Include="GBuffer.h" />
     <ClInclude Include="RenderingSystem.h" />
+    <ClInclude Include="ShadowMap.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="gbuffer.hlsl">
