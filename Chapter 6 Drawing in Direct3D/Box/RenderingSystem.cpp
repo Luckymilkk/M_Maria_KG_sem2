@@ -176,13 +176,13 @@ void RenderingSystem::BeginTessellationPass(
     ID3D12GraphicsCommandList* cmdList,
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle)
 {
- 
+
     mGBuffer.BindAsRenderTargets(cmdList, dsvHandle);
 
     cmdList->SetPipelineState(mTessPSO.Get());
     cmdList->SetGraphicsRootSignature(mTessRootSig.Get());
 
-  
+
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
 }
 
@@ -500,9 +500,12 @@ void RenderingSystem::BuildShadowPassPSO(ID3D12Device* device, DXGI_FORMAT depth
     psoDesc.VS = { mShadowVS->GetBufferPointer(), mShadowVS->GetBufferSize() };
     psoDesc.PS = { nullptr, 0 };
     psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-    psoDesc.RasterizerState.DepthBias = 1000;
-    psoDesc.RasterizerState.SlopeScaledDepthBias = 1.0f;
-    psoDesc.RasterizerState.DepthBiasClamp = 0.0f;
+    // DepthBias: компенсируем self-shadowing acne.
+    // При shadow map 2048 и shadowFar=60 один тексель ≈ 0.03 мировых единицы —
+    // constant bias 2000 + slope 2.0 обеспечивает стабильные тени без peter-panning.
+    psoDesc.RasterizerState.DepthBias = 100;
+    psoDesc.RasterizerState.SlopeScaledDepthBias = 2.0f;
+    psoDesc.RasterizerState.DepthBiasClamp = 0.01f;
     psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
     psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     psoDesc.SampleMask = UINT_MAX;

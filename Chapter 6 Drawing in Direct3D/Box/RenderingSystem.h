@@ -66,14 +66,16 @@ struct LightingPassConstants
 
     DirectX::XMFLOAT4X4 CascadeShadowTransform[4];
     DirectX::XMFLOAT4 CascadeSplits = { 10.0f, 30.0f, 80.0f, 150.0f };
-    DirectX::XMFLOAT4 ShadowParams = { 0.0020f, 1.0f / 1024.0f, 1.0f, 0.0f }; // bias, texelSize, pcfRadius, pad
+    // bias: чуть больше чтобы убрать shadow acne при малом shadowFar;
+    // texelSize автоматически масштабируется под 2048 map.
+    DirectX::XMFLOAT4 ShadowParams = { 0.0008f, 1.0f / 2048.0f, 1.0f, 0.0f };
 };
 
 class RenderingSystem
 {
 public:
     static const UINT kShadowCascadeCount = 2;
-    static const UINT kPublicShadowMapSize = 1024;
+    static const UINT kPublicShadowMapSize = 2048;
 
     RenderingSystem() = default;
     ~RenderingSystem() = default;
@@ -234,4 +236,3 @@ private:
     DXGI_FORMAT mBackBufferFormat = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT mDepthStencilFormat = DXGI_FORMAT_UNKNOWN;
 };
-

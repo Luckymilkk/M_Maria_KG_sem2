@@ -26,7 +26,7 @@ struct Vertex
     XMFLOAT3 Pos;
     XMFLOAT3 Normal;
     XMFLOAT2 TexC;
-    XMFLOAT3 Tangent; 
+    XMFLOAT3 Tangent;
 };
 
 struct MyTexture
@@ -49,8 +49,8 @@ struct RenderItem
     bool        CastShadow = false;
 
     XMFLOAT4X4  World = MathHelper::Identity4x4();
-    BoundingBox Bounds;                           
-    bool        IsVisible = true;                 
+    BoundingBox Bounds;
+    bool        IsVisible = true;
 };
 
 static bool RayTriangleIntersect(
@@ -155,24 +155,26 @@ private:
     static const size_t mMaxShotLights = 48;
 
 
-    int mTessObjBaseSrvIndex = -1; 
+    int mTessObjBaseSrvIndex = -1;
 
-    float mTessDisplaceScale = 0.04f; 
+    float mTessDisplaceScale = 0.04f;
     float mTessMinTessDist = 2.0f;
     float mTessMaxTessDist = 40.0f;
     float mTessMinTess = 1.0f;
     float mTessMaxTess = 16.0f;
-    float mTessWorldScale = 1.22f;   
-  
+    float mTessWorldScale = 1.22f;
+
     XMFLOAT3 mTessWorldOffset = { 0.0f, 0.12f, 1.75f };
     XMFLOAT3 mMainLightDir = { 0.3f, -1.0f, 0.5f };
     float mCascadeLambda = 0.85f;
-    float mShadowMaxDistance = 250.0f;
+    // Дальность теней: не слишком большая — иначе light-space box огромный и
+    // пиксели теней размываются до 1-2 текселей shadow map → мерцание.
+    float mShadowMaxDistance = 60.0f;
 
     enum class CullingMode { None = 0, BruteForce = 1, Octree = 2 };
     CullingMode mCullingMode = CullingMode::None;
 
-    std::vector<RenderItem> mInstancedItems; 
+    std::vector<RenderItem> mInstancedItems;
 
     struct OctreeNode {
         BoundingBox Box;
@@ -401,12 +403,12 @@ void BoxApp::BuildModelGeometry()
 
         for (size_t tri = 0; tri < triCount; ++tri)
         {
-           
+
             const auto& i0 = meshIndices[tri * 3 + 0];
             const auto& i1 = meshIndices[tri * 3 + 1];
             const auto& i2 = meshIndices[tri * 3 + 2];
 
-          
+
             XMFLOAT3 pos0 = { attrib.vertices[3 * i0.vertex_index + 0],
                                attrib.vertices[3 * i0.vertex_index + 1],
                                attrib.vertices[3 * i0.vertex_index + 2] };
@@ -417,7 +419,7 @@ void BoxApp::BuildModelGeometry()
                                attrib.vertices[3 * i2.vertex_index + 1],
                                attrib.vertices[3 * i2.vertex_index + 2] };
 
-          
+
             XMFLOAT2 uv0 = (i0.texcoord_index >= 0) ?
                 XMFLOAT2{ attrib.texcoords[2 * i0.texcoord_index + 0],
                           1.0f - attrib.texcoords[2 * i0.texcoord_index + 1] } :
@@ -445,7 +447,7 @@ void BoxApp::BuildModelGeometry()
             tangent.y = f * (deltaUV2.y * edge1.y - deltaUV1.y * edge2.y);
             tangent.z = f * (deltaUV2.y * edge1.z - deltaUV1.y * edge2.z);
 
-    
+
             XMVECTOR T = XMLoadFloat3(&tangent);
             float len = XMVectorGetX(XMVector3Length(T));
             if (len > 1e-6f)
@@ -485,7 +487,7 @@ void BoxApp::BuildModelGeometry()
         submesh.BaseVertexLocation = 0;
         mModelGeo->DrawArgs[shape.name] = submesh;
 
- 
+
         int texIndex = 0;
         if (matId >= 0 && matId < (int)materials.size())
         {
@@ -506,12 +508,12 @@ void BoxApp::BuildModelGeometry()
         ri.SubmeshName = shape.name;
         ri.TexSrvIndex = texIndex;
         ri.IsStar = false;
-        ri.UseTess = false; 
+        ri.UseTess = false;
         ri.CastShadow = false;
         mRenderItems.push_back(ri);
     }
 
- 
+
     mCpuVertices.reserve(allVertices.size());
     for (const auto& v : allVertices)
         mCpuVertices.push_back(v.Pos);
@@ -614,7 +616,7 @@ void BoxApp::BuildModelGeometry()
                         XMFLOAT2{ attrib3.texcoords[2 * j2.texcoord_index + 0],
                                  1.0f - attrib3.texcoords[2 * j2.texcoord_index + 1] } : XMFLOAT2{ 0,0 };
 
-                 
+
                     XMFLOAT3 e1 = { p1.x - p0.x,p1.y - p0.y,p1.z - p0.z };
                     XMFLOAT3 e2 = { p2.x - p0.x,p2.y - p0.y,p2.z - p0.z };
                     XMFLOAT2 d1 = { u1.x - u0.x,u1.y - u0.y };
@@ -669,7 +671,7 @@ void BoxApp::BuildModelGeometry()
         }
         else
         {
-     
+
             GeometryGenerator gen;
             GeometryGenerator::MeshData grid = gen.CreateGrid(4.0f, 4.0f, 7, 7);
 
@@ -705,97 +707,97 @@ void BoxApp::BuildModelGeometry()
         }
     }
 
-   
 
+
+    {
+        GeometryGenerator gen;
+
+        GeometryGenerator::MeshData grid = gen.CreateGrid(20.0f, 20.0f, 30, 30);
+
+        UINT indexOffset = (UINT)allIndices.size();
+        UINT baseV = (UINT)allVertices.size();
+
+        for (const auto& gv : grid.Vertices)
         {
-            GeometryGenerator gen;
-    
-            GeometryGenerator::MeshData grid = gen.CreateGrid(20.0f, 20.0f, 30, 30);
-
-            UINT indexOffset = (UINT)allIndices.size();
-            UINT baseV = (UINT)allVertices.size();
-
-            for (const auto& gv : grid.Vertices)
-            {
-                Vertex v = {};
-                v.Pos = gv.Position;
-                v.Normal = gv.Normal;
-                v.TexC = gv.TexC;
-                v.Tangent = gv.TangentU;
-                allVertices.push_back(v);
-            }
-            for (uint32_t ix : grid.Indices32)
-                allIndices.push_back(baseV + ix);
-
-            SubmeshGeometry submesh;
-            submesh.IndexCount = (UINT)grid.Indices32.size();
-            submesh.StartIndexLocation = indexOffset;
-            submesh.BaseVertexLocation = 0;
-            mModelGeo->DrawArgs["wavePlane"] = submesh;
-
-            RenderItem ri;
-            ri.SubmeshName = "wavePlane";
-            ri.UseTess = true;
- 
-            ri.TexSrvIndex = mTessObjBaseSrvIndex;         
-            ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1;  
-            ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2; 
-            ri.IsStar = false;
-            ri.CastShadow = false; // Большая плоскость даёт паразитный «квадрат» в CSM.
-            mRenderItems.push_back(ri);
-
-
+            Vertex v = {};
+            v.Pos = gv.Position;
+            v.Normal = gv.Normal;
+            v.TexC = gv.TexC;
+            v.Tangent = gv.TangentU;
+            allVertices.push_back(v);
         }
+        for (uint32_t ix : grid.Indices32)
+            allIndices.push_back(baseV + ix);
+
+        SubmeshGeometry submesh;
+        submesh.IndexCount = (UINT)grid.Indices32.size();
+        submesh.StartIndexLocation = indexOffset;
+        submesh.BaseVertexLocation = 0;
+        mModelGeo->DrawArgs["wavePlane"] = submesh;
+
+        RenderItem ri;
+        ri.SubmeshName = "wavePlane";
+        ri.UseTess = true;
+
+        ri.TexSrvIndex = mTessObjBaseSrvIndex;
+        ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1;
+        ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2;
+        ri.IsStar = false;
+        ri.CastShadow = true; // тень рисуется отдельным TRIANGLELIST-блоком в shadow pass
+        mRenderItems.push_back(ri);
 
 
-        //Билборд
+    }
+
+
+    //Билборд
+    {
+        GeometryGenerator gen;
+        GeometryGenerator::MeshData quad = gen.CreateGrid(1.0f, 1.0f, 2, 2);
+
+        UINT indexOffset = (UINT)allIndices.size();
+        UINT baseV = (UINT)allVertices.size();
+
+        for (const auto& v : quad.Vertices)
         {
-            GeometryGenerator gen;
-            GeometryGenerator::MeshData quad = gen.CreateGrid(1.0f, 1.0f, 2, 2);
+            Vertex vert = {};
 
-            UINT indexOffset = (UINT)allIndices.size();
-            UINT baseV = (UINT)allVertices.size();
-
-            for (const auto& v : quad.Vertices)
-            {
-                Vertex vert = {};
-
-                vert.Pos = { v.Position.x, v.Position.z, v.Position.y };
-                vert.Normal = { 0.0f, 0.0f, -1.0f };
-                vert.TexC = v.TexC;
-                vert.Tangent = { 1.0f, 0.0f, 0.0f };
-                allVertices.push_back(vert);
-            }
-            for (uint32_t ix : quad.Indices32)
-                allIndices.push_back(baseV + ix);
-
-            SubmeshGeometry submesh;
-            submesh.IndexCount = (UINT)quad.Indices32.size();
-            submesh.StartIndexLocation = indexOffset;
-            submesh.BaseVertexLocation = 0;
-            mModelGeo->DrawArgs["billboard"] = submesh;
+            vert.Pos = { v.Position.x, v.Position.z, v.Position.y };
+            vert.Normal = { 0.0f, 0.0f, -1.0f };
+            vert.TexC = v.TexC;
+            vert.Tangent = { 1.0f, 0.0f, 0.0f };
+            allVertices.push_back(vert);
         }
+        for (uint32_t ix : quad.Indices32)
+            allIndices.push_back(baseV + ix);
 
-        const UINT vbSize = (UINT)allVertices.size() * sizeof(Vertex);
-        const UINT ibSize = (UINT)allIndices.size() * sizeof(std::uint32_t);
+        SubmeshGeometry submesh;
+        submesh.IndexCount = (UINT)quad.Indices32.size();
+        submesh.StartIndexLocation = indexOffset;
+        submesh.BaseVertexLocation = 0;
+        mModelGeo->DrawArgs["billboard"] = submesh;
+    }
 
-        ThrowIfFailed(D3DCreateBlob(vbSize, &mModelGeo->VertexBufferCPU));
-        CopyMemory(mModelGeo->VertexBufferCPU->GetBufferPointer(), allVertices.data(), vbSize);
-        ThrowIfFailed(D3DCreateBlob(ibSize, &mModelGeo->IndexBufferCPU));
-        CopyMemory(mModelGeo->IndexBufferCPU->GetBufferPointer(), allIndices.data(), ibSize);
+    const UINT vbSize = (UINT)allVertices.size() * sizeof(Vertex);
+    const UINT ibSize = (UINT)allIndices.size() * sizeof(std::uint32_t);
 
-        mModelGeo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(
-            md3dDevice.Get(), mCommandList.Get(),
-            allVertices.data(), vbSize, mModelGeo->VertexBufferUploader);
-        mModelGeo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(
-            md3dDevice.Get(), mCommandList.Get(),
-            allIndices.data(), ibSize, mModelGeo->IndexBufferUploader);
+    ThrowIfFailed(D3DCreateBlob(vbSize, &mModelGeo->VertexBufferCPU));
+    CopyMemory(mModelGeo->VertexBufferCPU->GetBufferPointer(), allVertices.data(), vbSize);
+    ThrowIfFailed(D3DCreateBlob(ibSize, &mModelGeo->IndexBufferCPU));
+    CopyMemory(mModelGeo->IndexBufferCPU->GetBufferPointer(), allIndices.data(), ibSize);
 
-        mModelGeo->VertexByteStride = sizeof(Vertex);
-        mModelGeo->VertexBufferByteSize = vbSize;
-        mModelGeo->IndexFormat = DXGI_FORMAT_R32_UINT;
-        mModelGeo->IndexBufferByteSize = ibSize;
-    
+    mModelGeo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(
+        md3dDevice.Get(), mCommandList.Get(),
+        allVertices.data(), vbSize, mModelGeo->VertexBufferUploader);
+    mModelGeo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(
+        md3dDevice.Get(), mCommandList.Get(),
+        allIndices.data(), ibSize, mModelGeo->IndexBufferUploader);
+
+    mModelGeo->VertexByteStride = sizeof(Vertex);
+    mModelGeo->VertexBufferByteSize = vbSize;
+    mModelGeo->IndexFormat = DXGI_FORMAT_R32_UINT;
+    mModelGeo->IndexBufferByteSize = ibSize;
+
 }
 
 
@@ -808,7 +810,7 @@ void BoxApp::ShootLightFromCamera()
     float y = cosf(mPhi);
     XMVECTOR dir = XMVectorSet(x, y, z, 0.0f);
 
-    const float kStartOffset = 0.5f; 
+    const float kStartOffset = 0.5f;
     XMVECTOR rayOrigin = XMVectorAdd(eye, XMVectorScale(dir, kStartOffset));
 
     XMMATRIX world = XMLoadFloat4x4(&mSponzaWorld);
@@ -998,9 +1000,9 @@ void BoxApp::ComputeCascadeShadowData(
     std::array<float, RenderingSystem::kShadowCascadeCount>& outSplits) const
 {
     const float camNear = 1.0f;
-    const float camClipFar = 5000.0f; // должен совпадать с far plane в OnResize
-    const float shadowFar = MathHelper::Min(mShadowMaxDistance, camClipFar);
+    const float shadowFar = MathHelper::Min(mShadowMaxDistance, 5000.0f);
 
+    // Нелинейное распределение каскадов (Practical Split Scheme).
     for (UINT i = 0; i < RenderingSystem::kShadowCascadeCount; ++i)
     {
         float p = (float)(i + 1) / (float)RenderingSystem::kShadowCascadeCount;
@@ -1009,111 +1011,58 @@ void BoxApp::ComputeCascadeShadowData(
         outSplits[i] = mCascadeLambda * logSplit + (1.0f - mCascadeLambda) * uniSplit;
     }
 
-    XMMATRIX view = XMLoadFloat4x4(&mView);
-    XMMATRIX proj = XMLoadFloat4x4(&mProj);
-    XMMATRIX invViewProj = XMMatrixInverse(nullptr, view * proj);
     XMVECTOR lightDir = XMVector3Normalize(XMLoadFloat3(&mMainLightDir));
+    XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    if (fabsf(XMVectorGetY(lightDir)) > 0.95f)
+        up = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
 
-    XMVECTOR frustumCornersWS[8];
-    int idx = 0;
-    for (int z = 0; z <= 1; ++z)
-    {
-        float ndcZ = (float)z;
-        for (int y = 0; y <= 1; ++y)
-        {
-            float ndcY = y ? -1.0f : 1.0f;
-            for (int x = 0; x <= 1; ++x)
-            {
-                float ndcX = x ? 1.0f : -1.0f;
-                XMVECTOR p = XMVectorSet(ndcX, ndcY, ndcZ, 1.0f);
-                XMVECTOR world = XMVector4Transform(p, invViewProj);
-                world /= XMVectorSplatW(world);
-                frustumCornersWS[idx++] = world;
-            }
-        }
-    }
+    // -----------------------------------------------------------------------
+    // Scene-centric CSM: shadow box строится вокруг фиксированных точек сцены,
+    // НЕ вокруг frustum камеры.
+    //
+    // Frustum-based подход: при повороте/отлёте камеры center каскада уходит,
+    // объекты сцены выходят за пределы shadow map → тень исчезает.
+    //
+    // Cascade 0 — tight box вокруг центра сцены (tessMesh + wavePlane).
+    // Cascade 1 — широкий box покрывающий всю Sponza.
+    // Shadow map не зависит от направления взгляда камеры вообще.
+    // -----------------------------------------------------------------------
 
-    XMVECTOR nearCorners[4] = {
-        frustumCornersWS[0], frustumCornersWS[1], frustumCornersWS[2], frustumCornersWS[3]
-    };
-    XMVECTOR farCorners[4] = {
-        frustumCornersWS[4], frustumCornersWS[5], frustumCornersWS[6], frustumCornersWS[7]
-    };
+    // Центр сцены: tessMesh на (0, 0.12, 1.75), wavePlane на (0, 0.5, 0).
+    // Anchor между ними..
+    XMVECTOR sceneCenter = XMVectorSet(0.0f, 0.3f, 0.8f, 0.0f); 
 
-    float prevSplitDist = camNear;
+    // Радиусы: cascade 0 плотно вокруг объектов, cascade 1 — вся сцена.
+    const float radii[RenderingSystem::kShadowCascadeCount] = { 25.0f, 30.0f };
+
     for (UINT c = 0; c < RenderingSystem::kShadowCascadeCount; ++c)
     {
-        float splitDist = outSplits[c];
-        float tNear = (prevSplitDist - camNear) / (camClipFar - camNear);
-        float tFar = (splitDist - camNear) / (camClipFar - camNear);
+        float r = radii[c];
 
-        XMVECTOR cascadeCorners[8];
-        for (int i = 0; i < 4; ++i)
-        {
-            XMVECTOR ray = farCorners[i] - nearCorners[i];
-            cascadeCorners[i] = nearCorners[i] + ray * tNear;
-            cascadeCorners[i + 4] = nearCorners[i] + ray * tFar;
-        }
+        // Snap radius to texel grid — убирает shimmer при движении камеры.
+        float texelSize = (2.0f * r) / (float)RenderingSystem::kPublicShadowMapSize;
+        r = ceilf(r / texelSize) * texelSize;
 
-        XMVECTOR center = XMVectorZero();
-        for (int i = 0; i < 8; ++i) center += cascadeCorners[i];
-        center /= 8.0f;
+        XMVECTOR lightEye = sceneCenter - lightDir * (r * 2.0f);
+        XMMATRIX lightView = XMMatrixLookAtLH(lightEye, sceneCenter, up);
 
-        float radius = 0.0f;
-        for (int i = 0; i < 8; ++i)
-        {
-            float dist = XMVectorGetX(XMVector3Length(cascadeCorners[i] - center));
-            radius = MathHelper::Max(radius, dist);
-        }
-        radius = ceilf(radius * 16.0f) / 16.0f;
+        // Snap center to texel grid в light space — ключевой приём против shimmer.
+        XMVECTOR centerLS = XMVector3TransformCoord(sceneCenter, lightView);
+        XMFLOAT3 cLS;
+        XMStoreFloat3(&cLS, centerLS);
+        cLS.x = floorf(cLS.x / texelSize) * texelSize;
+        cLS.y = floorf(cLS.y / texelSize) * texelSize;
+        // Пересчитываем lightEye со snapped центром.
+        XMVECTOR snappedCenterLS = XMVectorSet(cLS.x, cLS.y, cLS.z, 1.0f);
+        XMMATRIX invLightView = XMMatrixInverse(nullptr, lightView);
+        XMVECTOR snappedCenter = XMVector3TransformCoord(snappedCenterLS, invLightView);
+        lightEye = snappedCenter - lightDir * (r * 2.0f);
+        lightView = XMMatrixLookAtLH(lightEye, snappedCenter, up);
 
-        XMVECTOR eye = center - lightDir * (radius * 2.5f);
-        XMVECTOR up = XMVectorSet(0, 1, 0, 0);
-        if (fabsf(XMVectorGetX(XMVector3Dot(up, lightDir))) > 0.95f)
-            up = XMVectorSet(0, 0, 1, 0);
-
-        XMMATRIX lightView = XMMatrixLookAtLH(eye, center, up);
-
-        XMFLOAT3 mins(FLT_MAX, FLT_MAX, FLT_MAX), maxs(-FLT_MAX, -FLT_MAX, -FLT_MAX);
-        for (int i = 0; i < 8; ++i)
-        {
-            XMVECTOR cornerLS = XMVector3TransformCoord(cascadeCorners[i], lightView);
-            XMFLOAT3 p;
-            XMStoreFloat3(&p, cornerLS);
-            mins.x = MathHelper::Min(mins.x, p.x);
-            mins.y = MathHelper::Min(mins.y, p.y);
-            mins.z = MathHelper::Min(mins.z, p.z);
-            maxs.x = MathHelper::Max(maxs.x, p.x);
-            maxs.y = MathHelper::Max(maxs.y, p.y);
-            maxs.z = MathHelper::Max(maxs.z, p.z);
-        }
-
-        const float zMult = 6.0f;
-        float extentX = maxs.x - mins.x;
-        float extentY = maxs.y - mins.y;
-        float texelSizeX = extentX / (float)RenderingSystem::kPublicShadowMapSize;
-        float texelSizeY = extentY / (float)RenderingSystem::kPublicShadowMapSize;
-        // Snap to texel grid: floor for min, ceil for max — so the projection
-        // covers the full cascade sub-frustum without shrinking it.
-        if (texelSizeX > 1e-6f)
-        {
-            mins.x = floorf(mins.x / texelSizeX) * texelSizeX;
-            maxs.x = ceilf(maxs.x  / texelSizeX) * texelSizeX;
-        }
-        if (texelSizeY > 1e-6f)
-        {
-            mins.y = floorf(mins.y / texelSizeY) * texelSizeY;
-            maxs.y = ceilf(maxs.y  / texelSizeY) * texelSizeY;
-        }
-
-        XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(
-            mins.x, maxs.x, mins.y, maxs.y,
-            mins.z - radius * zMult,
-            maxs.z + radius * zMult);
+        XMMATRIX lightProj = XMMatrixOrthographicLH(r * 2.0f, r * 2.0f, -500.0f, 500.0f);
 
         XMMATRIX shadowTransform = lightView * lightProj;
         XMStoreFloat4x4(&outShadowTransforms[c], XMMatrixTranspose(shadowTransform));
-        prevSplitDist = splitDist;
     }
 }
 
@@ -1136,7 +1085,7 @@ void BoxApp::Draw(const GameTimer& gt)
         mCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
     }
 
-   
+
     XMMATRIX world = XMLoadFloat4x4(&mWorld);
     XMMATRIX view = XMLoadFloat4x4(&mView);
     XMMATRIX proj = XMLoadFloat4x4(&mProj);
@@ -1163,16 +1112,14 @@ void BoxApp::Draw(const GameTimer& gt)
         for (const auto& ri : mRenderItems)
         {
             if (!ri.CastShadow) continue;
+            // wavePlane рисуется отдельно ниже (tessellated shadow)
+            if (ri.SubmeshName == "wavePlane") continue;
 
             XMMATRIX worldMat = XMLoadFloat4x4(&ri.World);
             if (ri.SubmeshName == "tessMesh")
             {
                 worldMat = XMMatrixScaling(mTessWorldScale, mTessWorldScale, mTessWorldScale) *
                     XMMatrixTranslation(mTessWorldOffset.x, mTessWorldOffset.y, mTessWorldOffset.z) * world;
-            }
-            else if (ri.SubmeshName == "wavePlane")
-            {
-                worldMat = XMMatrixTranslation(0.0f, -1.0f, 0.0f);
             }
 
             GeometryPassConstants sc;
@@ -1183,8 +1130,23 @@ void BoxApp::Draw(const GameTimer& gt)
             mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
         }
 
-        // На слабых GPU отключаем тени от инстансированных билбордов:
-        // это сильно уменьшает нагрузку на shadow-pass, при этом CSM для основной сцены сохраняется.
+        // wavePlane намеренно исключена из shadow pass:
+        // статичная TRIANGLELIST-геометрия не совпадает с анимированным tessellated мешем
+        // и создаёт вторую ложную тень под полом Sponza.
+        // Тени от tessMesh и звёзд на полу Sponza остаются корректными.
+        // wavePlane в shadow pass — Y=0.5 совпадает с base position в geometry pass.
+        {
+            for (const auto& ri : mRenderItems)
+            {
+                if (ri.SubmeshName != "wavePlane") continue;
+                XMMATRIX waveWorld = XMMatrixTranslation(0.0f, 0.5f, 0.0f);
+                GeometryPassConstants sc;
+                XMStoreFloat4x4(&sc.WorldViewProj, XMMatrixTranspose(waveWorld * shadowViewProj));
+                mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), sc, shadowCbIndex++);
+                const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
+                mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
+            }
+        }
     }
     mRenderingSystem.EndShadowPass(mCommandList.Get());
     mCommandList->RSSetViewports(1, &mScreenViewport);
@@ -1293,15 +1255,17 @@ void BoxApp::Draw(const GameTimer& gt)
         if (!ri.UseTess) continue;
         if (ri.TexSrvIndex < 0 || ri.NormalSrvIndex < 0 || ri.DisplaceSrvIndex < 0) continue;
 
-       
+
         GeometryPassConstants gc;
         XMMATRIX finalWorld;
 
-    
+
         if (ri.SubmeshName == "wavePlane")
         {
-            finalWorld = XMMatrixTranslation(0.0f, -1.0f, 0.0f);
-            gc.pad.x = 1.0f; 
+            // Y=0.02 — чуть выше пола Sponza (Y=0) чтобы не было z-fighting.
+            // Раньше было -1.0 → плоскость уходила под пол, тени падали под сцену.
+            finalWorld = XMMatrixTranslation(0.0f, 0.5f, 0.0f);
+            gc.pad.x = 1.0f;
         }
         else
         {
@@ -1309,10 +1273,10 @@ void BoxApp::Draw(const GameTimer& gt)
             finalWorld = XMMatrixScaling(ts, ts, ts) *
                 XMMatrixTranslation(mTessWorldOffset.x, mTessWorldOffset.y, mTessWorldOffset.z) *
                 world;
-            gc.pad.x = 0.0f; 
+            gc.pad.x = 0.0f;
         }
 
-     
+
         XMStoreFloat4x4(&gc.WorldViewProj, XMMatrixTranspose(finalWorld * view * proj));
         XMStoreFloat4x4(&gc.World, XMMatrixTranspose(finalWorld));
         XMStoreFloat4x4(&gc.WorldInvTranspose,
@@ -1335,10 +1299,10 @@ void BoxApp::Draw(const GameTimer& gt)
         srvBase.Offset(ri.TexSrvIndex, srvSize);
         mCommandList->SetGraphicsRootDescriptorTable(2, srvBase);
 
-    
+
         mRenderingSystem.SetTessellationConstants(mCommandList.Get(), gc, geomCbIndex++, tc, tessCbSlot++);
 
-     
+
         const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
         mCommandList->DrawIndexedInstanced(
             sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
@@ -1347,7 +1311,7 @@ void BoxApp::Draw(const GameTimer& gt)
     // После отрисовки основных RenderItems в Tessellation Pass:
     for (const auto& ri : mInstancedItems)
     {
-        if (!ri.IsVisible) continue; 
+        if (!ri.IsVisible) continue;
 
         XMMATRIX worldMat = XMLoadFloat4x4(&ri.World);
         GeometryPassConstants gc;
@@ -1357,7 +1321,7 @@ void BoxApp::Draw(const GameTimer& gt)
         gc.Time = gt.TotalTime();
         gc.pad.x = 0.0f;
 
-        TessellationConstants tc; 
+        TessellationConstants tc;
         tc.EyePosW = mEyePosW;
         tc.DisplaceScale = mTessDisplaceScale;
         tc.MinTessDist = mTessMinTessDist; tc.MaxTessDist = mTessMaxTessDist;
@@ -1372,12 +1336,12 @@ void BoxApp::Draw(const GameTimer& gt)
             mModelGeo->DrawArgs[ri.SubmeshName].StartIndexLocation, 0, 0);
     }
 
-    
+
     mRenderingSystem.EndGeometryPass(mCommandList.Get());
 
-  
+
     // LIGHTING PASS
-  
+
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         mDepthStencilBuffer.Get(),
         D3D12_RESOURCE_STATE_DEPTH_WRITE,
@@ -1492,7 +1456,7 @@ void BoxApp::BuildInstancedItems() {
 
     int billboardTexIndex = 0;
     for (int i = 0; i < (int)mAllTextures.size(); ++i) {
-        if (mAllTextures[i]->Name == "human_sprite") { 
+        if (mAllTextures[i]->Name == "human_sprite") {
             billboardTexIndex = i; break;
         }
     }
