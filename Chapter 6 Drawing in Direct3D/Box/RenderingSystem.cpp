@@ -431,10 +431,18 @@ void RenderingSystem::BuildTessellationPSO(ID3D12Device* device, DXGI_FORMAT dep
 
 void RenderingSystem::BuildShadowPSO(ID3D12Device* device)
 {
-    CD3DX12_ROOT_PARAMETER params[1];
-    params[0].InitAsConstantBufferView(0); // b0
+    // Описываем расширенную Root Signature для прохода теней, которая принимает текстуры
+    CD3DX12_DESCRIPTOR_RANGE texTable;
+    texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); // t0 - текстура маски (альфа-канала)
 
-    CD3DX12_ROOT_SIGNATURE_DESC desc(1, params, 0, nullptr,
+    CD3DX12_ROOT_PARAMETER params[2];
+    params[0].InitAsConstantBufferView(0); // b0 - константный буфер ShadowPassConstants
+    params[1].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL); // t0 - привязка текстуры в PS
+
+    // Линейный статический сэмплер для выборки из текстуры маски
+    auto sampler = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
+
+    CD3DX12_ROOT_SIGNATURE_DESC desc(2, params, 1, &sampler,
         D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
     ComPtr<ID3DBlob> serial, err;
@@ -442,7 +450,9 @@ void RenderingSystem::BuildShadowPSO(ID3D12Device* device)
     ThrowIfFailed(device->CreateRootSignature(0, serial->GetBufferPointer(),
         serial->GetBufferSize(), IID_PPV_ARGS(&mShadowRootSig)));
 
+    // Компилируем и вершинный, и пиксельный шейдеры для теней
     mShadowVS = d3dUtil::CompileShader(L"Shaders\\shadow.hlsl", nullptr, "VS", "vs_5_1");
+    mShadowPS = d3dUtil::CompileShader(L"Shaders\\shadow.hlsl", nullptr, "PS", "ps_5_1");
 
     std::vector<D3D12_INPUT_ELEMENT_DESC> inputLayout = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -455,9 +465,11 @@ void RenderingSystem::BuildShadowPSO(ID3D12Device* device)
     psoDesc.InputLayout = { inputLayout.data(), (UINT)inputLayout.size() };
     psoDesc.pRootSignature = mShadowRootSig.Get();
     psoDesc.VS = { mShadowVS->GetBufferPointer(), mShadowVS->GetBufferSize() };
+    psoDesc.PS = { mShadowPS->GetBufferPointer(), mShadowPS->GetBufferSize() }; // Связываем пиксельный шейдер
+
     psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
 
-    // Аппаратный Slope-Scaled Depth Bias для устранения артефактов
+    // Настройка смещения для устранения артефактов ("shadow acne")
     psoDesc.RasterizerState.DepthBias = 1500;
     psoDesc.RasterizerState.DepthBiasClamp = 0.0f;
     psoDesc.RasterizerState.SlopeScaledDepthBias = 1.5f;
@@ -466,7 +478,7 @@ void RenderingSystem::BuildShadowPSO(ID3D12Device* device)
     psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     psoDesc.SampleMask = UINT_MAX;
     psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    psoDesc.NumRenderTargets = 0; // Рендерим только глубину
+    psoDesc.NumRenderTargets = 0; // Запись идет только в буфер глубины (карту теней)
     psoDesc.SampleDesc.Count = 1;
     psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 

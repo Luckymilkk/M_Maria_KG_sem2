@@ -47,6 +47,8 @@ struct TessellationConstants
 struct ShadowPassConstants
 {
     DirectX::XMFLOAT4X4 WorldViewProj = MathHelper::Identity4x4();
+    float               UseAlphaTest = 0.0f; // 1.0f - включить альфа-тест, 0.0f - выключить
+    DirectX::XMFLOAT3   Pad = {};
 };
 
 static const int kMaxLights = 64;
@@ -195,7 +197,7 @@ private:
     Microsoft::WRL::ComPtr<ID3DBlob> mGeomVS, mGeomPS;
     Microsoft::WRL::ComPtr<ID3DBlob> mLightVS, mLightPS;
     Microsoft::WRL::ComPtr<ID3DBlob> mTessVS, mTessHS, mTessDS, mTessPS;
-    Microsoft::WRL::ComPtr<ID3DBlob> mShadowVS;
+    Microsoft::WRL::ComPtr<ID3DBlob> mShadowVS, mShadowPS;
 
     std::unique_ptr<UploadBuffer<GeometryPassConstants>>  mGeomCB;
     std::unique_ptr<UploadBuffer<LightingPassConstants>>  mLightCB;

@@ -303,11 +303,14 @@ void BoxApp::LoadTextures()
     addTexDDS(L"models/source/725b3a4da0ef_Tiny_green_starw__3_roughness.dds", "star_roughness");
     addTexDDS(L"models/source/725b3a4da0ef_Tiny_green_starw__3_metallic.dds", "star_metallic");
 
-    addTexDDS(L"models/source/convertio.in_albedo.dds", "tess_diffuse");     // t0
-    addTexDDS(L"models/source/convertio.in_normal.dds", "tess_normal");      // t1
-    addTexDDS(L"models/source/convertio.in_displacement.dds", "tess_displacement"); // t2
+    addTexDDS(L"models/source/convertio.in_albedo.dds", "tess_diffuse");
+    addTexDDS(L"models/source/convertio.in_normal.dds", "tess_normal");
+    addTexDDS(L"models/source/convertio.in_displacement.dds", "tess_displacement");
 
     addTexDDS(L"models/source/CC556105.dds", "human_sprite");
+
+    // Загрузка диффузной карты платформы с альфа-каналом
+    addTexDDS(L"models/source/butterfly.dds", "platform_diffuse");
 }
 
 void BoxApp::BuildDescriptorHeaps()
@@ -502,7 +505,7 @@ void BoxApp::BuildModelGeometry()
         ri.TexSrvIndex = texIndex;
         ri.IsStar = false;
         ri.UseTess = false;
-        ri.CastShadow = true; // Sponza по умолчанию отбрасывает тень
+        ri.CastShadow = false;
         mRenderItems.push_back(ri);
     }
 
@@ -559,7 +562,7 @@ void BoxApp::BuildModelGeometry()
         ri.TexSrvIndex = texIndex;
         ri.IsStar = true;
         ri.UseTess = false;
-        ri.CastShadow = false; // Сами мелкие летающие звезды тени не отбрасывают (они самосветящиеся)
+        ri.CastShadow = false;
         mRenderItems.push_back(ri);
     }
 
@@ -656,7 +659,7 @@ void BoxApp::BuildModelGeometry()
             ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1;
             ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2;
             ri.IsStar = false;
-            ri.CastShadow = true; // Тесселированная сфера будет отбрасывать тени
+            ri.CastShadow = true;
             mRenderItems.push_back(ri);
         }
         else
@@ -691,7 +694,7 @@ void BoxApp::BuildModelGeometry()
             ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1;
             ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2;
             ri.IsStar = false;
-            ri.CastShadow = true;
+            ri.CastShadow = false;
             mRenderItems.push_back(ri);
         }
     }
@@ -728,7 +731,7 @@ void BoxApp::BuildModelGeometry()
         ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1;
         ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2;
         ri.IsStar = false;
-        ri.CastShadow = false; // Анимированная плоскость отбрасывает тени
+        ri.CastShadow = false;
         mRenderItems.push_back(ri);
     }
 
@@ -756,6 +759,60 @@ void BoxApp::BuildModelGeometry()
         submesh.StartIndexLocation = indexOffset;
         submesh.BaseVertexLocation = 0;
         mModelGeo->DrawArgs["billboard"] = submesh;
+    }
+
+    {
+        GeometryGenerator gen;
+        GeometryGenerator::MeshData grid = gen.CreateGrid(16.0f, 12.0f, 2, 2);
+
+        UINT indexOffset = (UINT)allIndices.size();
+        UINT baseV = (UINT)allVertices.size();
+
+        for (const auto& gv : grid.Vertices)
+        {
+            Vertex v = {};
+            // Переводим сетку в вертикальное положение (по оси X-Y),
+            // приподнимая на gv.Position.z + 6.0f, чтобы низ плоскости касался пола
+            v.Pos = { gv.Position.x +90.0f, 40.0f, gv.Position.z };
+
+            // Нормаль для горизонтальной плоскости должна смотреть вверх (ось Y)
+            v.Normal = { 0.0f, 1.0f, 0.0f };
+
+            v.TexC = gv.TexC;
+            v.Tangent = { 1.0f, 0.0f, 0.0f }; // Касательная остается направленной вдоль оси X
+
+            allVertices.push_back(v);
+        }
+        for (uint32_t ix : grid.Indices32)
+            allIndices.push_back(baseV + ix);
+
+        SubmeshGeometry submesh;
+        submesh.IndexCount = (UINT)grid.Indices32.size();
+        submesh.StartIndexLocation = indexOffset;
+        submesh.BaseVertexLocation = 0;
+        mModelGeo->DrawArgs["texturedPlatform"] = submesh;
+
+        // Поиск текстуры "platform_diffuse"
+        int platformTexIndex = 0;
+        for (int i = 0; i < (int)mAllTextures.size(); ++i) {
+            if (mAllTextures[i]->Name == "platform_diffuse") {
+                platformTexIndex = i;
+                break;
+            }
+        }
+
+        // Создаем RenderItem для платформы
+        RenderItem platformRi;
+        platformRi.SubmeshName = "texturedPlatform";
+        platformRi.TexSrvIndex = platformTexIndex;
+        platformRi.IsStar = false;
+        platformRi.UseTess = false;
+        platformRi.CastShadow = true;
+
+        // Смещаем платформу по оси Z на -25.0f, уводя ее из центральной части в проход двора
+        XMMATRIX w = XMMatrixTranslation(0.0f, 0.2f, -25.0f);
+        XMStoreFloat4x4(&platformRi.World, w);
+        mRenderItems.push_back(platformRi);
     }
 
     const UINT vbSize = (UINT)allVertices.size() * sizeof(Vertex);
@@ -872,7 +929,7 @@ void BoxApp::ComputeCascades(
     // Поднимаем свет на оптимальные 300 метров над игроком
     DirectX::XMVECTOR lightPos = DirectX::XMVectorSubtract(camPos, DirectX::XMVectorScale(lightDir, 1000.0f));
 
-    DirectX::XMMATRIX lightView = DirectX::XMMatrixLookAtLH(lightPos, camPos, DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f));
+    DirectX::XMMATRIX lightView = DirectX::XMMatrixLookAtLH(lightPos, camPos, DirectX::XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f));;
 
     // Устанавливаем сбалансированную глубину света в 600 метров (этого с запасом хватит на всю высоту Спонзы)
     for (int i = 0; i < 3; ++i)
@@ -919,7 +976,7 @@ void BoxApp::Update(const GameTimer& gt)
     XMStoreFloat4x4(&mView, XMMatrixLookAtLH(pos, target, upVec));
 
     // CSM расчеты
-    XMVECTOR lightDir = XMVectorSet(0.3f, -1.0f, 0.5f, 0.0f);
+    XMVECTOR lightDir = XMVectorSet(0.01f, -1.0f, 0.01f, 0.0f);
 
     // Создаем стабильную матрицу вида без вращения камеры (используем staticTarget вместо target)
     XMVECTOR camPos = XMLoadFloat3(&mCurrCameraPos);
@@ -1022,7 +1079,13 @@ void BoxApp::Draw(const GameTimer& gt)
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
         D3D12_RESOURCE_STATE_DEPTH_WRITE));
 
+    // Привязываем кучу дескрипторов текстур, чтобы проход теней мог использовать альфа-карту платформы
+    ID3D12DescriptorHeap* shadowHeaps[] = { mObjectSrvHeap.Get() };
+    mCommandList->SetDescriptorHeaps(_countof(shadowHeaps), shadowHeaps);
+
+    UINT srvSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     UINT shadowCbIndex = 0;
+
     for (int cascade = 0; cascade < ShadowMap::NumCascades; ++cascade)
     {
         mRenderingSystem.BeginShadowPass(
@@ -1046,13 +1109,29 @@ void BoxApp::Draw(const GameTimer& gt)
             ShadowPassConstants sc;
             XMStoreFloat4x4(&sc.WorldViewProj, XMMatrixTranspose(worldMat * mLightViewProj[cascade]));
 
+            // Включаем альфа-тест для биллбордов и нашей новой горизонтальной платформы
+            bool isAlphaTested = (ri.SubmeshName == "billboard" ||
+                ri.SubmeshName == "texturedPlatform" ||
+                ri.SubmeshName.find("leaf") != std::string::npos ||
+                ri.SubmeshName.find("thorn") != std::string::npos ||
+                ri.SubmeshName.find("plant") != std::string::npos ||
+                ri.SubmeshName.find("bush") != std::string::npos ||
+                ri.SubmeshName.find("ivy") != std::string::npos);
+
+            sc.UseAlphaTest = isAlphaTested ? 1.0f : 0.0f;
+
             mRenderingSystem.SetShadowPassConstants(mCommandList.Get(), sc, shadowCbIndex++);
+
+            // Передаем текстуру объекта в проход теней
+            CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
+            texHandle.Offset(ri.TexSrvIndex, srvSize);
+            mCommandList->SetGraphicsRootDescriptorTable(1, texHandle);
 
             const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
             mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
         }
 
-        // Инстансированные объекты с активным флагом CastShadow
+        // Инстансированные объекты с активным флагом CastShadow (биллборды людей)
         for (const auto& ri : mInstancedItems)
         {
             if (!ri.CastShadow || !ri.IsVisible) continue;
@@ -1061,7 +1140,14 @@ void BoxApp::Draw(const GameTimer& gt)
             ShadowPassConstants sc;
             XMStoreFloat4x4(&sc.WorldViewProj, XMMatrixTranspose(worldMat * mLightViewProj[cascade]));
 
+            bool isAlphaTested = (ri.SubmeshName == "billboard");
+            sc.UseAlphaTest = isAlphaTested ? 1.0f : 0.0f;
+
             mRenderingSystem.SetShadowPassConstants(mCommandList.Get(), sc, shadowCbIndex++);
+
+            CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
+            texHandle.Offset(ri.TexSrvIndex, srvSize);
+            mCommandList->SetGraphicsRootDescriptorTable(1, texHandle);
 
             const auto& sub = mModelGeo->DrawArgs[ri.SubmeshName];
             mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
@@ -1091,8 +1177,6 @@ void BoxApp::Draw(const GameTimer& gt)
     XMMATRIX world = XMLoadFloat4x4(&mWorld);
     XMMATRIX view = XMLoadFloat4x4(&mView);
     XMMATRIX proj = XMLoadFloat4x4(&mProj);
-
-    UINT srvSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
     mCommandList->IASetVertexBuffers(0, 1, &mModelGeo->VertexBufferView());
     mCommandList->IASetIndexBuffer(&mModelGeo->IndexBufferView());
@@ -1222,7 +1306,6 @@ void BoxApp::Draw(const GameTimer& gt)
 
         CD3DX12_GPU_DESCRIPTOR_HANDLE srvBase(mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
         srvBase.Offset(ri.TexSrvIndex, srvSize);
-        //mCommandList->SetDescriptorHeaps(1, &mObjectSrvHeap);
         mCommandList->SetGraphicsRootDescriptorTable(2, srvBase);
 
         mRenderingSystem.SetTessellationConstants(mCommandList.Get(), gc, geomCbIndex++, tc, tessCbSlot++);
@@ -1253,7 +1336,7 @@ void BoxApp::Draw(const GameTimer& gt)
     mCommandList->ClearRenderTargetView(CurrentBackBufferView(), Colors::Black, 0, nullptr);
 
     mRenderingSystem.ClearLights();
-    mRenderingSystem.AddDirectionalLight({ 0.3f,-1.0f,0.5f }, { 1.0f,0.95f,0.8f }, 1.0f);
+    mRenderingSystem.AddDirectionalLight({ 0.01f, -1.0f, 0.01f }, { 1.0f, 0.95f, 0.8f }, 1.0f);
     mRenderingSystem.AddPointLight({ 0.0f,2.0f, 0.0f }, { 1.0f,0.2f,0.1f }, 3.0f, 8.0f);
     mRenderingSystem.AddPointLight({ 5.0f,2.0f,-3.0f }, { 0.1f,0.5f,1.0f }, 2.0f, 6.0f);
     mRenderingSystem.AddSpotLight({ 0.0f,5.0f,0.0f }, { 0.0f,-1.0f,0.0f }, { 1.0f,1.0f,0.8f }, 5.0f, 10.0f, 30.0f);
@@ -1364,7 +1447,7 @@ void BoxApp::BuildInstancedItems() {
                 ri.SubmeshName = "billboard";
                 ri.TexSrvIndex = billboardTexIndex;
                 ri.UseTess = false;
-                ri.CastShadow = false; // Билборды людей не должны отбрасывать тени
+                ri.CastShadow = true; // Билборды людей теперь отбрасывают тени
 
                 XMMATRIX w = XMMatrixTranslation(x * 8.0f - 40.0f, y * 3.0f + 1.0f, z * 8.0f + 20.0f);
                 XMStoreFloat4x4(&ri.World, w);

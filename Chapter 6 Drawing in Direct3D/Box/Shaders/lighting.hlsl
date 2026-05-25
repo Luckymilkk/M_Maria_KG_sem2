@@ -104,7 +104,7 @@ float SampleShadowMap(float3 projCoords, int cascadeIndex)
             shadow += gShadowMap.SampleCmpLevelZero(
                 gsamShadow, 
                 float3(projCoords.xy + offset, (float)cascadeIndex), 
-                projCoords.z - 0.0003f // Уменьшили смещение до 0.0003f, чтобы вернуть тени
+                projCoords.z - 0.0001f // Уменьшили смещение до 0.0003f, чтобы вернуть тени
             );
         }
     }
@@ -125,8 +125,8 @@ float4 PS(VertexOut pin) : SV_Target
 
     // Выбор каскада на основе нелинейных интервалов
     int cascadeIndex = 0;
-    if (viewDepth > gCascadeEndDepths[0]) cascadeIndex = 1;
-    if (viewDepth > gCascadeEndDepths[1]) cascadeIndex = 2;
+    if (viewDepth > gCascadeEndDepths.x) cascadeIndex = 1;
+    if (viewDepth > gCascadeEndDepths.y) cascadeIndex = 2;
 
     // Проецирование в текстурные координаты каскада
     float4 lightSpacePos = mul(float4(posW, 1.0f), gLightViewProj[cascadeIndex]);

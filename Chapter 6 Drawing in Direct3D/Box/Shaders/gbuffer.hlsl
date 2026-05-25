@@ -76,10 +76,8 @@ PSOutput PS(VertexOut pin)
 
     float4 albedo = gDiffuseMap.Sample(gsamLinear, pin.TexC);
 
-    if (gPad.x == 2.0f)
-    {
-        clip(albedo.a - 0.1f);
-    }
+    // Безусловная отсечка прозрачных пикселей (альфа-тест)
+    clip(albedo.a - 0.1f);
 
     if (max(albedo.r, max(albedo.g, albedo.b)) < 0.03f)
         albedo.rgb = float3(0.6f, 0.6f, 0.6f);
