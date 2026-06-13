@@ -47,7 +47,7 @@ struct TessellationConstants
 struct ShadowPassConstants
 {
     DirectX::XMFLOAT4X4 WorldViewProj = MathHelper::Identity4x4();
-    float               UseAlphaTest = 0.0f; // 1.0f - включить альфа-тест, 0.0f - выключить
+    float               UseAlphaTest = 0.0f;
     DirectX::XMFLOAT3   Pad = {};
 };
 
@@ -67,9 +67,19 @@ struct LightingPassConstants
     DirectX::XMFLOAT4X4 InvView;
     DirectX::XMFLOAT4X4 InvProj;
 
-    // CSM данные для пиксельного шейдера
     DirectX::XMFLOAT4X4 LightViewProj[3];
-    float               CascadeEndDepths[4]; // До 4-х элементов для выравнивания границы
+    float               CascadeEndDepths[4];
+};
+
+struct PostProcessConstants
+{
+    int   EnableThermal = 0;
+    int   EnableChromatic = 0;
+    int   EnableLensFlare = 0;
+    float Pad0 = 0.0f;
+    DirectX::XMFLOAT2 LightScreenPos = { 0.5f, 0.5f };
+    float LightVisible = 0.0f;
+    float Time = 0.0f;
 };
 
 class RenderingSystem
@@ -141,7 +151,6 @@ public:
         const TessellationConstants& tessConsts,
         UINT tessIndex = 0);
 
-    // ---- Shadow Pass ----
     void BeginShadowPass(ID3D12GraphicsCommandList* cmdList,
         D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle,
         D3D12_VIEWPORT viewport, D3D12_RECT scissor);
@@ -169,9 +178,18 @@ public:
         DirectX::XMFLOAT4X4 invView,
         DirectX::XMFLOAT4X4 invProj,
         D3D12_GPU_DESCRIPTOR_HANDLE depthSrvHandle,
-        D3D12_GPU_DESCRIPTOR_HANDLE shadowSrvHandle, // SRV массива карт теней
-        const DirectX::XMMATRIX* lightViewProjMats,   // Матрицы CSM
-        const float* splitDepths);                   // Границы разделения CSM
+        D3D12_GPU_DESCRIPTOR_HANDLE shadowSrvHandle,
+        const DirectX::XMMATRIX* lightViewProjMats,
+        const float* splitDepths);
+
+    void DoPostProcessPass(ID3D12GraphicsCommandList* cmdList,
+        D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
+        bool enableThermal,
+        bool enableChromatic,
+        bool enableLensFlare,
+        DirectX::XMFLOAT2 lightScreenPos,
+        bool lightVisible,
+        float time);
 
 private:
     void BuildGeometryPassPSO(ID3D12Device* device, DXGI_FORMAT depthStencilFormat);
@@ -179,8 +197,10 @@ private:
         DXGI_FORMAT depthStencilFormat);
     void BuildTessellationPSO(ID3D12Device* device, DXGI_FORMAT depthStencilFormat);
     void BuildShadowPSO(ID3D12Device* device);
+    void BuildPostProcessPSO(ID3D12Device* device, DXGI_FORMAT backBufferFormat);
     void BuildRootSignatures(ID3D12Device* device);
-    void BuildFullscreenQuad(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList);
+    void BuildOffscreenResources(ID3D12Device* device, UINT width, UINT height,
+        ID3D12DescriptorHeap* rtvHeap, ID3D12DescriptorHeap* srvHeap);
 
     GBuffer mGBuffer;
 
@@ -188,21 +208,25 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mLightingRootSig;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mTessRootSig;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mShadowRootSig;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> mPostProcessRootSig;
 
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometryPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mLightingPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mTessPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mShadowPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mPostProcessPSO;
 
     Microsoft::WRL::ComPtr<ID3DBlob> mGeomVS, mGeomPS;
     Microsoft::WRL::ComPtr<ID3DBlob> mLightVS, mLightPS;
     Microsoft::WRL::ComPtr<ID3DBlob> mTessVS, mTessHS, mTessDS, mTessPS;
     Microsoft::WRL::ComPtr<ID3DBlob> mShadowVS, mShadowPS;
+    Microsoft::WRL::ComPtr<ID3DBlob> mPostProcessVS, mPostProcessPS;
 
     std::unique_ptr<UploadBuffer<GeometryPassConstants>>  mGeomCB;
     std::unique_ptr<UploadBuffer<LightingPassConstants>>  mLightCB;
     std::unique_ptr<UploadBuffer<TessellationConstants>>  mTessCB;
     std::unique_ptr<UploadBuffer<ShadowPassConstants>>    mShadowCB;
+    std::unique_ptr<UploadBuffer<PostProcessConstants>>   mPostProcessCB;
 
     UINT mGeomCBByteSize = 0;
     UINT mShadowCBByteSize = 0;
@@ -211,13 +235,16 @@ private:
 
     std::vector<LightData> mLights;
 
-    Microsoft::WRL::ComPtr<ID3D12Resource> mQuadVB;
-    Microsoft::WRL::ComPtr<ID3D12Resource> mQuadVBUploader;
-    D3D12_VERTEX_BUFFER_VIEW               mQuadVBView = {};
-
     ID3D12DescriptorHeap* mSrvHeap = nullptr;
     UINT                  mGbufferSrvOffset = 0;
 
     DXGI_FORMAT mBackBufferFormat = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT mDepthStencilFormat = DXGI_FORMAT_UNKNOWN;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> mOffscreenTex;
+    D3D12_CPU_DESCRIPTOR_HANDLE            mOffscreenRtvHandle = {};
+    D3D12_GPU_DESCRIPTOR_HANDLE            mOffscreenSrvHandle = {};
+
+    UINT mOffscreenRtvOffset = 0;
+    UINT mOffscreenSrvOffset = 0;
 };

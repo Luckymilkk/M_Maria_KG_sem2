@@ -4,12 +4,6 @@
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
 
-struct QuadVertex
-{
-    XMFLOAT3 Pos;
-    XMFLOAT2 TexC;
-};
-
 void RenderingSystem::Init(
     ID3D12Device* device,
     ID3D12GraphicsCommandList* cmdList,
@@ -26,6 +20,9 @@ void RenderingSystem::Init(
     mSrvHeap = srvHeap;
     mGbufferSrvOffset = gbufferSrvOffset;
 
+    mOffscreenRtvOffset = gbufferRtvOffset + GBuffer::NumRTs;
+    mOffscreenSrvOffset = gbufferSrvOffset + GBuffer::NumRTs + 2;
+
     mGBuffer.Init(device, width, height, rtvHeap, srvHeap, gbufferRtvOffset, gbufferSrvOffset);
 
     mGeomCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(GeometryPassConstants));
@@ -35,14 +32,16 @@ void RenderingSystem::Init(
     mLightCB = std::make_unique<UploadBuffer<LightingPassConstants>>(device, 1, true);
     mTessCB = std::make_unique<UploadBuffer<TessellationConstants>>(device, kMaxTessCBs, true);
     mShadowCB = std::make_unique<UploadBuffer<ShadowPassConstants>>(device, kMaxGeometryCBs, true);
+    mPostProcessCB = std::make_unique<UploadBuffer<PostProcessConstants>>(device, 1, true);
 
     BuildRootSignatures(device);
     BuildGeometryPassPSO(device, depthStencilFormat);
     BuildLightingPassPSO(device, backBufferFormat, depthStencilFormat);
     BuildTessellationPSO(device, depthStencilFormat);
     BuildShadowPSO(device);
+    BuildPostProcessPSO(device, backBufferFormat);
 
-    BuildFullscreenQuad(device, cmdList);
+    BuildOffscreenResources(device, width, height, rtvHeap, srvHeap);
 }
 
 void RenderingSystem::OnResize(
@@ -56,6 +55,7 @@ void RenderingSystem::OnResize(
     mSrvHeap = srvHeap;
     mGbufferSrvOffset = gbufferSrvOffset;
     mGBuffer.OnResize(device, width, height, rtvHeap, srvHeap, gbufferRtvOffset, gbufferSrvOffset);
+    BuildOffscreenResources(device, width, height, rtvHeap, srvHeap);
 }
 
 void RenderingSystem::AddDirectionalLight(XMFLOAT3 direction, XMFLOAT3 color, float intensity)
@@ -161,7 +161,6 @@ void RenderingSystem::SetTessellationConstants(
     cmdList->SetGraphicsRootConstantBufferView(1, tessAddr);
 }
 
-// ---- Shadow Pass ----
 void RenderingSystem::BeginShadowPass(
     ID3D12GraphicsCommandList* cmdList,
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle,
@@ -202,6 +201,14 @@ void RenderingSystem::DoLightingPass(
     const XMMATRIX* lightViewProjMats,
     const float* splitDepths)
 {
+    cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+        mOffscreenTex.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_RENDER_TARGET));
+
+    float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    cmdList->ClearRenderTargetView(mOffscreenRtvHandle, clearColor, 0, nullptr);
+
     LightingPassConstants lightConsts = {};
     lightConsts.NumLights = (int)mLights.size();
     lightConsts.EyePosW = eyePos;
@@ -211,7 +218,6 @@ void RenderingSystem::DoLightingPass(
     for (int i = 0; i < (int)mLights.size(); ++i)
         lightConsts.Lights[i] = mLights[i];
 
-    // CSM
     for (int i = 0; i < 3; ++i)
     {
         XMStoreFloat4x4(&lightConsts.LightViewProj[i], XMMatrixTranspose(lightViewProjMats[i]));
@@ -220,24 +226,61 @@ void RenderingSystem::DoLightingPass(
 
     mLightCB->CopyData(0, lightConsts);
 
-    cmdList->OMSetRenderTargets(1, &rtvHandle, true, &dsvHandle);
+    cmdList->OMSetRenderTargets(1, &mOffscreenRtvHandle, true, &dsvHandle);
     cmdList->SetPipelineState(mLightingPSO.Get());
     cmdList->SetGraphicsRootSignature(mLightingRootSig.Get());
     cmdList->SetGraphicsRootConstantBufferView(0, mLightCB->Resource()->GetGPUVirtualAddress());
     cmdList->SetGraphicsRootDescriptorTable(1, mGBuffer.GetSRVTable());
     cmdList->SetGraphicsRootDescriptorTable(2, depthSrvHandle);
-    cmdList->SetGraphicsRootDescriptorTable(3, shadowSrvHandle); // CSM SRV под t4
+    cmdList->SetGraphicsRootDescriptorTable(3, shadowSrvHandle);
 
-    cmdList->IASetVertexBuffers(0, 1, &mQuadVBView);
+    // ВЕРШИННЫЙ БУФЕР НЕ БИНДИТСЯ. Отрисовывается ровно 3 вершины
     cmdList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cmdList->DrawInstanced(6, 1, 0, 0);
+    cmdList->DrawInstanced(3, 1, 0, 0);
+
+    cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+        mOffscreenTex.Get(),
+        D3D12_RESOURCE_STATE_RENDER_TARGET,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+}
+
+void RenderingSystem::DoPostProcessPass(
+    ID3D12GraphicsCommandList* cmdList,
+    D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
+    bool enableThermal,
+    bool enableChromatic,
+    bool enableLensFlare,
+    XMFLOAT2 lightScreenPos,
+    bool lightVisible,
+    float time)
+{
+    cmdList->OMSetRenderTargets(1, &backBufferRtv, true, nullptr);
+
+    PostProcessConstants consts = {};
+    consts.EnableThermal = enableThermal ? 1 : 0;
+    consts.EnableChromatic = enableChromatic ? 1 : 0;
+    consts.EnableLensFlare = enableLensFlare ? 1 : 0;
+    consts.LightScreenPos = lightScreenPos;
+    consts.LightVisible = lightVisible ? 1.0f : 0.0f;
+    consts.Time = time;
+
+    mPostProcessCB->CopyData(0, consts);
+
+    cmdList->SetPipelineState(mPostProcessPSO.Get());
+    cmdList->SetGraphicsRootSignature(mPostProcessRootSig.Get());
+    cmdList->SetGraphicsRootConstantBufferView(0, mPostProcessCB->Resource()->GetGPUVirtualAddress());
+    cmdList->SetGraphicsRootDescriptorTable(1, mOffscreenSrvHandle);
+
+    // ВЕРШИННЫЙ БУФЕР НЕ БИНДИТСЯ. Отрисовывается ровно 3 вершины
+    cmdList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmdList->DrawInstanced(3, 1, 0, 0);
 }
 
 void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
 {
     {
         CD3DX12_DESCRIPTOR_RANGE texTable;
-        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); // t0
+        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
 
         CD3DX12_ROOT_PARAMETER params[2];
         params[0].InitAsConstantBufferView(0);
@@ -255,13 +298,13 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
 
     {
         CD3DX12_DESCRIPTOR_RANGE gbufTable;
-        gbufTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::NumRTs, 0); // t0, t1, t2
+        gbufTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::NumRTs, 0);
 
         CD3DX12_DESCRIPTOR_RANGE depthTable;
-        depthTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, GBuffer::NumRTs); // t3
+        depthTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, GBuffer::NumRTs);
 
         CD3DX12_DESCRIPTOR_RANGE shadowTable;
-        shadowTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, GBuffer::NumRTs + 1); // t4 (CSM)
+        shadowTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, GBuffer::NumRTs + 1);
 
         CD3DX12_ROOT_PARAMETER params[4];
         params[0].InitAsConstantBufferView(0);
@@ -269,13 +312,10 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
         params[2].InitAsDescriptorTable(1, &depthTable, D3D12_SHADER_VISIBILITY_PIXEL);
         params[3].InitAsDescriptorTable(1, &shadowTable, D3D12_SHADER_VISIBILITY_PIXEL);
 
-        // Статические сэмплеры:
-        // s0: Point Sampler для G-buffer
-        // s1: Comparison Sampler для PCF теней
         CD3DX12_STATIC_SAMPLER_DESC samplers[2];
         samplers[0] = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_POINT);
         samplers[1] = CD3DX12_STATIC_SAMPLER_DESC(
-            1, // register s1
+            1,
             D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR,
             D3D12_TEXTURE_ADDRESS_MODE_BORDER,
             D3D12_TEXTURE_ADDRESS_MODE_BORDER,
@@ -297,7 +337,7 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
 
     {
         CD3DX12_DESCRIPTOR_RANGE texTable;
-        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0); // t0..t2
+        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);
 
         CD3DX12_ROOT_PARAMETER params[3];
         params[0].InitAsConstantBufferView(0);
@@ -319,6 +359,24 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
         ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serial, &err));
         ThrowIfFailed(device->CreateRootSignature(0, serial->GetBufferPointer(),
             serial->GetBufferSize(), IID_PPV_ARGS(&mTessRootSig)));
+    }
+
+    {
+        CD3DX12_DESCRIPTOR_RANGE texRange;
+        texRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
+        CD3DX12_ROOT_PARAMETER params[2];
+        params[0].InitAsConstantBufferView(0);
+        params[1].InitAsDescriptorTable(1, &texRange, D3D12_SHADER_VISIBILITY_PIXEL);
+
+        auto sampler = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
+        CD3DX12_ROOT_SIGNATURE_DESC desc(2, params, 1, &sampler,
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+        ComPtr<ID3DBlob> serial, err;
+        ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serial, &err));
+        ThrowIfFailed(device->CreateRootSignature(0, serial->GetBufferPointer(),
+            serial->GetBufferSize(), IID_PPV_ARGS(&mPostProcessRootSig)));
     }
 }
 
@@ -360,13 +418,9 @@ void RenderingSystem::BuildLightingPassPSO(ID3D12Device* device,
     mLightVS = d3dUtil::CompileShader(L"Shaders\\lighting.hlsl", nullptr, "VS", "vs_5_1");
     mLightPS = d3dUtil::CompileShader(L"Shaders\\lighting.hlsl", nullptr, "PS", "ps_5_1");
 
-    std::vector<D3D12_INPUT_ELEMENT_DESC> inputLayout = {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-    };
-
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-    psoDesc.InputLayout = { inputLayout.data(), (UINT)inputLayout.size() };
+    // УКАЗЫВАЕМ NULL ДЛЯ ВХОДНОГО МАКЕТА - вершинного буфера нет!
+    psoDesc.InputLayout = { nullptr, 0 };
     psoDesc.pRootSignature = mLightingRootSig.Get();
     psoDesc.VS = { mLightVS->GetBufferPointer(), mLightVS->GetBufferSize() };
     psoDesc.PS = { mLightPS->GetBufferPointer(), mLightPS->GetBufferSize() };
@@ -382,7 +436,7 @@ void RenderingSystem::BuildLightingPassPSO(ID3D12Device* device,
     psoDesc.SampleMask = UINT_MAX;
     psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     psoDesc.NumRenderTargets = 1;
-    psoDesc.RTVFormats[0] = backBufferFmt;
+    psoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     psoDesc.SampleDesc.Count = 1;
     psoDesc.DSVFormat = depthFmt;
 
@@ -431,15 +485,13 @@ void RenderingSystem::BuildTessellationPSO(ID3D12Device* device, DXGI_FORMAT dep
 
 void RenderingSystem::BuildShadowPSO(ID3D12Device* device)
 {
-    // Описываем расширенную Root Signature для прохода теней, которая принимает текстуры
     CD3DX12_DESCRIPTOR_RANGE texTable;
-    texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); // t0 - текстура маски (альфа-канала)
+    texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
 
     CD3DX12_ROOT_PARAMETER params[2];
-    params[0].InitAsConstantBufferView(0); // b0 - константный буфер ShadowPassConstants
-    params[1].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL); // t0 - привязка текстуры в PS
+    params[0].InitAsConstantBufferView(0);
+    params[1].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
 
-    // Линейный статический сэмплер для выборки из текстуры маски
     auto sampler = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
 
     CD3DX12_ROOT_SIGNATURE_DESC desc(2, params, 1, &sampler,
@@ -450,7 +502,6 @@ void RenderingSystem::BuildShadowPSO(ID3D12Device* device)
     ThrowIfFailed(device->CreateRootSignature(0, serial->GetBufferPointer(),
         serial->GetBufferSize(), IID_PPV_ARGS(&mShadowRootSig)));
 
-    // Компилируем и вершинный, и пиксельный шейдеры для теней
     mShadowVS = d3dUtil::CompileShader(L"Shaders\\shadow.hlsl", nullptr, "VS", "vs_5_1");
     mShadowPS = d3dUtil::CompileShader(L"Shaders\\shadow.hlsl", nullptr, "PS", "ps_5_1");
 
@@ -465,11 +516,10 @@ void RenderingSystem::BuildShadowPSO(ID3D12Device* device)
     psoDesc.InputLayout = { inputLayout.data(), (UINT)inputLayout.size() };
     psoDesc.pRootSignature = mShadowRootSig.Get();
     psoDesc.VS = { mShadowVS->GetBufferPointer(), mShadowVS->GetBufferSize() };
-    psoDesc.PS = { mShadowPS->GetBufferPointer(), mShadowPS->GetBufferSize() }; // Связываем пиксельный шейдер
+    psoDesc.PS = { mShadowPS->GetBufferPointer(), mShadowPS->GetBufferSize() };
 
     psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
 
-    // Настройка смещения для устранения артефактов ("shadow acne")
     psoDesc.RasterizerState.DepthBias = 1500;
     psoDesc.RasterizerState.DepthBiasClamp = 0.0f;
     psoDesc.RasterizerState.SlopeScaledDepthBias = 1.5f;
@@ -478,29 +528,90 @@ void RenderingSystem::BuildShadowPSO(ID3D12Device* device)
     psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     psoDesc.SampleMask = UINT_MAX;
     psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    psoDesc.NumRenderTargets = 0; // Запись идет только в буфер глубины (карту теней)
+    psoDesc.NumRenderTargets = 0;
     psoDesc.SampleDesc.Count = 1;
     psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 
     ThrowIfFailed(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mShadowPSO)));
 }
 
-void RenderingSystem::BuildFullscreenQuad(ID3D12Device* device,
-    ID3D12GraphicsCommandList* cmdList)
+void RenderingSystem::BuildPostProcessPSO(ID3D12Device* device, DXGI_FORMAT backBufferFmt)
 {
-    QuadVertex verts[6] = {
-        { { -1.0f,  1.0f, 0.0f }, { 0.0f, 0.0f } },
-        { {  1.0f,  1.0f, 0.0f }, { 1.0f, 0.0f } },
-        { { -1.0f, -1.0f, 0.0f }, { 0.0f, 1.0f } },
-        { { -1.0f, -1.0f, 0.0f }, { 0.0f, 1.0f } },
-        { {  1.0f,  1.0f, 0.0f }, { 1.0f, 0.0f } },
-        { {  1.0f, -1.0f, 0.0f }, { 1.0f, 1.0f } },
-    };
+    mPostProcessVS = d3dUtil::CompileShader(L"Shaders\\postprocess.hlsl", nullptr, "VS", "vs_5_1");
+    mPostProcessPS = d3dUtil::CompileShader(L"Shaders\\postprocess.hlsl", nullptr, "PS", "ps_5_1");
 
-    UINT byteSize = sizeof(verts);
-    mQuadVB = d3dUtil::CreateDefaultBuffer(device, cmdList, verts, byteSize, mQuadVBUploader);
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+    // УКАЗЫВАЕМ NULL ДЛЯ ВХОДНОГО МАКЕТА - вершинного буфера нет!
+    psoDesc.InputLayout = { nullptr, 0 };
+    psoDesc.pRootSignature = mPostProcessRootSig.Get();
+    psoDesc.VS = { mPostProcessVS->GetBufferPointer(), mPostProcessVS->GetBufferSize() };
+    psoDesc.PS = { mPostProcessPS->GetBufferPointer(), mPostProcessPS->GetBufferSize() };
+    psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
 
-    mQuadVBView.BufferLocation = mQuadVB->GetGPUVirtualAddress();
-    mQuadVBView.StrideInBytes = sizeof(QuadVertex);
-    mQuadVBView.SizeInBytes = byteSize;
+    auto dsDesc = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    dsDesc.DepthEnable = FALSE;
+    dsDesc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    psoDesc.DepthStencilState = dsDesc;
+
+    psoDesc.SampleMask = UINT_MAX;
+    psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    psoDesc.NumRenderTargets = 1;
+    psoDesc.RTVFormats[0] = backBufferFmt;
+    psoDesc.SampleDesc.Count = 1;
+
+    ThrowIfFailed(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mPostProcessPSO)));
+}
+
+void RenderingSystem::BuildOffscreenResources(
+    ID3D12Device* device,
+    UINT width, UINT height,
+    ID3D12DescriptorHeap* rtvHeap,
+    ID3D12DescriptorHeap* srvHeap)
+{
+    mOffscreenTex.Reset();
+
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Alignment = 0;
+    texDesc.Width = width;
+    texDesc.Height = height;
+    texDesc.DepthOrArraySize = 1;
+    texDesc.MipLevels = 1;
+    texDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.SampleDesc.Quality = 0;
+    texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    texDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+    D3D12_CLEAR_VALUE clearVal = {};
+    clearVal.Format = texDesc.Format;
+    clearVal.Color[0] = 0.0f;
+    clearVal.Color[1] = 0.0f;
+    clearVal.Color[2] = 0.0f;
+    clearVal.Color[3] = 1.0f;
+
+    auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+    ThrowIfFailed(device->CreateCommittedResource(
+        &heapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &texDesc,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        &clearVal,
+        IID_PPV_ARGS(&mOffscreenTex)
+    ));
+
+    UINT rtvDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    mOffscreenRtvHandle = rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    mOffscreenRtvHandle.ptr += (size_t)mOffscreenRtvOffset * rtvDescSize;
+    device->CreateRenderTargetView(mOffscreenTex.Get(), nullptr, mOffscreenRtvHandle);
+
+    UINT srvDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE srvCpuHandle(srvHeap->GetCPUDescriptorHandleForHeapStart());
+    srvCpuHandle.Offset(mOffscreenSrvOffset, srvDescSize);
+    device->CreateShaderResourceView(mOffscreenTex.Get(), nullptr, srvCpuHandle);
+
+    mOffscreenSrvHandle = srvHeap->GetGPUDescriptorHandleForHeapStart();
+    mOffscreenSrvHandle.ptr += (size_t)mOffscreenSrvOffset * srvDescSize;
 }

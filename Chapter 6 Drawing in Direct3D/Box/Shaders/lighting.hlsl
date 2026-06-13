@@ -1,4 +1,4 @@
-// lighting.hlsl
+// Shaders/lighting.hlsl
 Texture2D          gAlbedo   : register(t0);
 Texture2D          gNormal   : register(t1);
 Texture2D          gSpecular : register(t2);
@@ -41,14 +41,17 @@ cbuffer cbLighting : register(b0)
     float4    gCascadeEndDepths; 
 };
 
-struct VertexIn  { float3 PosL : POSITION; float2 TexC : TEXCOORD; };
 struct VertexOut { float4 PosH : SV_POSITION; float2 TexC : TEXCOORD; };
 
-VertexOut VS(VertexIn vin)
+// ГЕНЕРАЦИЯ ПОЛНОЭКРАННОГО ТРЕУГОЛЬНИКА БЕЗ ВЕРШИННОГО БУФЕРА
+VertexOut VS(uint vertexID : SV_VertexID)
 {
     VertexOut vout;
-    vout.PosH = float4(vin.PosL, 1.0f);
-    vout.TexC = vin.TexC;
+    // vertexID = 0 -> TexC = (0, 0), PosH = (-1,  1)
+    // vertexID = 1 -> TexC = (2, 0), PosH = ( 3,  1)
+    // vertexID = 2 -> TexC = (0, 2), PosH = (-1, -3)
+    vout.TexC = float2((vertexID << 1) & 2, vertexID & 2);
+    vout.PosH = float4(vout.TexC * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
     return vout;
 }
 
@@ -90,7 +93,6 @@ float3 CalcSpecular(float3 normal, float3 lightDir, float3 toEye,
 
 float SampleShadowMap(float3 projCoords, int cascadeIndex)
 {
-    // Фильтрация PCF 3x3
     float shadow = 0.0f;
     float2 texelSize = 1.0f / 2048.0f;
     
@@ -104,7 +106,7 @@ float SampleShadowMap(float3 projCoords, int cascadeIndex)
             shadow += gShadowMap.SampleCmpLevelZero(
                 gsamShadow, 
                 float3(projCoords.xy + offset, (float)cascadeIndex), 
-                projCoords.z - 0.0001f // Уменьшили смещение до 0.0003f, чтобы вернуть тени
+                projCoords.z - 0.0001f 
             );
         }
     }
@@ -119,16 +121,12 @@ float4 PS(VertexOut pin) : SV_Target
         return float4(0.0f, 0.0f, 0.0f, 1.0f);
 
     float3 posW = ReconstructWorldPos(pin.TexC, depth);
+    float viewDepth = length(posW - gEyePosW);
 
-    // Вычисляем линейную Z-глубину в пространстве камеры
-   float viewDepth = length(posW - gEyePosW);
-
-    // Выбор каскада на основе нелинейных интервалов
     int cascadeIndex = 0;
     if (viewDepth > gCascadeEndDepths.x) cascadeIndex = 1;
     if (viewDepth > gCascadeEndDepths.y) cascadeIndex = 2;
 
-    // Проецирование в текстурные координаты каскада
     float4 lightSpacePos = mul(float4(posW, 1.0f), gLightViewProj[cascadeIndex]);
     float3 projCoords = lightSpacePos.xyz / lightSpacePos.w;
     projCoords.x = projCoords.x * 0.5f + 0.5f;
@@ -166,7 +164,7 @@ float4 PS(VertexOut pin) : SV_Target
         if (light.Type == LIGHT_DIRECTIONAL)
         {
             lightDir = normalize(-light.Direction);
-            atten = shadowFactor; // Тень накладывается только на направленный свет
+            atten = shadowFactor; 
         }
         else if (light.Type == LIGHT_POINT)
         {

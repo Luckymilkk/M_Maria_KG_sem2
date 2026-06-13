@@ -47,7 +47,7 @@ struct RenderItem
     XMFLOAT4X4  World = MathHelper::Identity4x4();
     BoundingBox Bounds;
     bool        IsVisible = true;
-    bool        CastShadow = true; // NEW: Возможность выбирать, какие объекты отбрасывают тени
+    bool        CastShadow = true;
 };
 
 static bool RayTriangleIntersect(
@@ -94,7 +94,6 @@ private:
     void BuildDepthSRV();
     void ShootLightFromCamera();
 
-    // CSM
     void ComputeCascades(
         const DirectX::XMVECTOR& lightDir,
         const DirectX::XMMATRIX& viewMat,
@@ -106,7 +105,7 @@ private:
 
     ComPtr<ID3D12DescriptorHeap> mGbufferRtvHeap;
     ComPtr<ID3D12DescriptorHeap> mSrvHeap;
-    ComPtr<ID3D12DescriptorHeap> mDsvHeap; // Для CSM прохода глубин
+    ComPtr<ID3D12DescriptorHeap> mDsvHeap;
     ComPtr<ID3D12DescriptorHeap> mObjectSrvHeap;
     D3D12_GPU_DESCRIPTOR_HANDLE  mDepthSrvGpuHandle = {};
 
@@ -118,7 +117,8 @@ private:
     static const UINT mGbufferRtvOffset = 0;
     static const UINT mGbufferSrvOffset = 0;
     static const UINT mDepthSrvOffset = GBuffer::NumRTs;
-    static const UINT mShadowSrvOffset = GBuffer::NumRTs + 1; // За глубиной GBuffer-а
+    static const UINT mShadowSrvOffset = GBuffer::NumRTs + 1;
+    static const UINT mOffscreenSrvOffset = GBuffer::NumRTs + 2; // индекс 5
 
     std::vector<std::unique_ptr<MyTexture>> mAllTextures;
     std::unique_ptr<MeshGeometry>           mModelGeo = nullptr;
@@ -181,9 +181,12 @@ private:
     };
     std::unique_ptr<OctreeNode> mRootNode;
 
-    // CSM матрицы и данные
     DirectX::XMMATRIX mLightViewProj[3];
     float             mCascadeSplitDepths[3];
+
+    bool mEnableThermal = false;
+    bool mEnableChromatic = false;
+    bool mEnableLensFlare = false;
 
     void BuildInstancedItems();
     void BuildOctree(OctreeNode* node, int depth);
@@ -308,8 +311,6 @@ void BoxApp::LoadTextures()
     addTexDDS(L"models/source/convertio.in_displacement.dds", "tess_displacement");
 
     addTexDDS(L"models/source/CC556105.dds", "human_sprite");
-
-    // Загрузка диффузной карты платформы с альфа-каналом
     addTexDDS(L"models/source/butterfly.dds", "platform_diffuse");
 }
 
@@ -318,14 +319,13 @@ void BoxApp::BuildDescriptorHeaps()
     LoadTextures();
 
     D3D12_DESCRIPTOR_HEAP_DESC rtvDesc = {};
-    rtvDesc.NumDescriptors = GBuffer::NumRTs;
+    rtvDesc.NumDescriptors = GBuffer::NumRTs + 1; // 3 Gbuffer RTs + 1 Offscreen HDR RT
     rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     rtvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&mGbufferRtvHeap)));
 
-    // SRV Heap: GBuffer + глубина (1) + каскады CSM (1)
     D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
-    srvDesc.NumDescriptors = GBuffer::NumRTs + 2;
+    srvDesc.NumDescriptors = GBuffer::NumRTs + 3; // GBuffer SRVs (3) + depth (1) + CSM (1) + Offscreen SRV (1)
     srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&mSrvHeap)));
@@ -349,7 +349,6 @@ void BoxApp::BuildDescriptorHeaps()
         mGbufferRtvHeap.Get(), mSrvHeap.Get(),
         mGbufferRtvOffset, mGbufferSrvOffset);
 
-    // CSM инициализация
     mShadowMap.Init(md3dDevice.Get(), 2048, 2048, mDsvHeap.Get(), 0, mSrvHeap.Get(), mShadowSrvOffset);
 
     UINT srvSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -771,15 +770,10 @@ void BoxApp::BuildModelGeometry()
         for (const auto& gv : grid.Vertices)
         {
             Vertex v = {};
-            // Переводим сетку в вертикальное положение (по оси X-Y),
-            // приподнимая на gv.Position.z + 6.0f, чтобы низ плоскости касался пола
-            v.Pos = { gv.Position.x +90.0f, 40.0f, gv.Position.z };
-
-            // Нормаль для горизонтальной плоскости должна смотреть вверх (ось Y)
+            v.Pos = { gv.Position.x + 90.0f, 40.0f, gv.Position.z };
             v.Normal = { 0.0f, 1.0f, 0.0f };
-
             v.TexC = gv.TexC;
-            v.Tangent = { 1.0f, 0.0f, 0.0f }; // Касательная остается направленной вдоль оси X
+            v.Tangent = { 1.0f, 0.0f, 0.0f };
 
             allVertices.push_back(v);
         }
@@ -792,7 +786,6 @@ void BoxApp::BuildModelGeometry()
         submesh.BaseVertexLocation = 0;
         mModelGeo->DrawArgs["texturedPlatform"] = submesh;
 
-        // Поиск текстуры "platform_diffuse"
         int platformTexIndex = 0;
         for (int i = 0; i < (int)mAllTextures.size(); ++i) {
             if (mAllTextures[i]->Name == "platform_diffuse") {
@@ -801,7 +794,6 @@ void BoxApp::BuildModelGeometry()
             }
         }
 
-        // Создаем RenderItem для платформы
         RenderItem platformRi;
         platformRi.SubmeshName = "texturedPlatform";
         platformRi.TexSrvIndex = platformTexIndex;
@@ -809,7 +801,6 @@ void BoxApp::BuildModelGeometry()
         platformRi.UseTess = false;
         platformRi.CastShadow = true;
 
-        // Смещаем платформу по оси Z на -25.0f, уводя ее из центральной части в проход двора
         XMMATRIX w = XMMatrixTranslation(0.0f, 0.2f, -25.0f);
         XMStoreFloat4x4(&platformRi.World, w);
         mRenderItems.push_back(platformRi);
@@ -909,9 +900,14 @@ LRESULT BoxApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             mTessMaxTess = MathHelper::Min(64.0f, mTessMaxTess + 1.0f);
         if (wParam == VK_NEXT)
             mTessMaxTess = MathHelper::Max(1.0f, mTessMaxTess - 1.0f);
+
         if (wParam == '1') mCullingMode = CullingMode::None;
         if (wParam == '2') mCullingMode = CullingMode::BruteForce;
         if (wParam == '3') mCullingMode = CullingMode::Octree;
+
+        if (wParam == '4') mEnableThermal = !mEnableThermal;
+        if (wParam == '5') mEnableChromatic = !mEnableChromatic;
+        if (wParam == '6') mEnableLensFlare = !mEnableLensFlare;
     }
     return D3DApp::MsgProc(hwnd, msg, wParam, lParam);
 }
@@ -921,17 +917,13 @@ void BoxApp::ComputeCascades(
     const DirectX::XMMATRIX& viewMat,
     float nearClip, float farClip, float aspect, float fov)
 {
-    // Сбалансированные диаметры каскадов для отличного охвата без потери точности
     float cascadeSizes[3] = { 360.0f, 720.0f, 1200.0f };
 
     DirectX::XMVECTOR camPos = DirectX::XMLoadFloat3(&mCurrCameraPos);
-
-    // Поднимаем свет на оптимальные 300 метров над игроком
     DirectX::XMVECTOR lightPos = DirectX::XMVectorSubtract(camPos, DirectX::XMVectorScale(lightDir, 1000.0f));
 
     DirectX::XMMATRIX lightView = DirectX::XMMatrixLookAtLH(lightPos, camPos, DirectX::XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f));;
 
-    // Устанавливаем сбалансированную глубину света в 600 метров (этого с запасом хватит на всю высоту Спонзы)
     for (int i = 0; i < 3; ++i)
     {
         float size = cascadeSizes[i];
@@ -939,10 +931,9 @@ void BoxApp::ComputeCascades(
         mLightViewProj[i] = lightView * lightProj;
     }
 
-    // Сбалансированные радиусы переключения каскадов в зависимости от расстояния до камеры
-    mCascadeSplitDepths[0] = 80.0f;   // Ближний каскад: до 40 метров (высокая четкость в Спонзе)
-    mCascadeSplitDepths[1] = 240.0f;  // Средний каскад: до 120 метров
-    mCascadeSplitDepths[2] = 600.0f;  // Дальний каскад: до 300 метров (при полете вверх)
+    mCascadeSplitDepths[0] = 80.0f;
+    mCascadeSplitDepths[1] = 240.0f;
+    mCascadeSplitDepths[2] = 600.0f;
 }
 
 void BoxApp::Update(const GameTimer& gt)
@@ -975,10 +966,8 @@ void BoxApp::Update(const GameTimer& gt)
     XMVECTOR target = XMVectorAdd(pos, lookDir);
     XMStoreFloat4x4(&mView, XMMatrixLookAtLH(pos, target, upVec));
 
-    // CSM расчеты
     XMVECTOR lightDir = XMVectorSet(0.01f, -1.0f, 0.01f, 0.0f);
 
-    // Создаем стабильную матрицу вида без вращения камеры (используем staticTarget вместо target)
     XMVECTOR camPos = XMLoadFloat3(&mCurrCameraPos);
     XMVECTOR staticTarget = XMVectorAdd(camPos, XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f));
     XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
@@ -986,7 +975,6 @@ void BoxApp::Update(const GameTimer& gt)
 
     ComputeCascades(lightDir, staticView, 1.0f, 1000.0f, AspectRatio(), 0.25f * MathHelper::Pi);
 
-    // FRUSTUM CULLING 
     XMMATRIX projMat = XMLoadFloat4x4(&mProj);
     XMMATRIX viewMat = XMLoadFloat4x4(&mView);
 
@@ -1018,12 +1006,15 @@ void BoxApp::Update(const GameTimer& gt)
     std::wstring modeName = (mCullingMode == CullingMode::None) ? L"None" :
         (mCullingMode == CullingMode::BruteForce) ? L"BruteForce" : L"Octree";
 
+    // Выводим информацию по активным пост-эффектам в заголовок окна
     std::wstring stats = L"Culling: " + modeName +
-        L" | Visible: " + std::to_wstring(visibleCount) +
-        L" / " + std::to_wstring(mInstancedItems.size());
+        L" | Visible: " + std::to_wstring(visibleCount) + L"/" + std::to_wstring(mInstancedItems.size()) +
+        L" | FX: [4] Thermal: " + (mEnableThermal ? L"ON" : L"OFF") +
+        L" [5] Chromatic: " + (mEnableChromatic ? L"ON" : L"OFF") +
+        L" [6] LensFlare: " + (mEnableLensFlare ? L"ON" : L"OFF");
+
     SetWindowText(mhMainWnd, stats.c_str());
 
-    // SHOT LIGHTS
     if (mShootRequested)
     {
         ShootLightFromCamera();
@@ -1079,7 +1070,6 @@ void BoxApp::Draw(const GameTimer& gt)
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
         D3D12_RESOURCE_STATE_DEPTH_WRITE));
 
-    // Привязываем кучу дескрипторов текстур, чтобы проход теней мог использовать альфа-карту платформы
     ID3D12DescriptorHeap* shadowHeaps[] = { mObjectSrvHeap.Get() };
     mCommandList->SetDescriptorHeaps(_countof(shadowHeaps), shadowHeaps);
 
@@ -1099,8 +1089,6 @@ void BoxApp::Draw(const GameTimer& gt)
         mCommandList->IASetIndexBuffer(&mModelGeo->IndexBufferView());
         mCommandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-        // Рендерим только те объекты, которые отбрасывают тень (CastShadow == true)
-        XMMATRIX baseWorld = XMLoadFloat4x4(&mWorld);
         for (const auto& ri : mRenderItems)
         {
             if (!ri.CastShadow || ri.IsStar || ri.UseTess) continue;
@@ -1109,7 +1097,6 @@ void BoxApp::Draw(const GameTimer& gt)
             ShadowPassConstants sc;
             XMStoreFloat4x4(&sc.WorldViewProj, XMMatrixTranspose(worldMat * mLightViewProj[cascade]));
 
-            // Включаем альфа-тест для биллбордов и нашей новой горизонтальной платформы
             bool isAlphaTested = (ri.SubmeshName == "billboard" ||
                 ri.SubmeshName == "texturedPlatform" ||
                 ri.SubmeshName.find("leaf") != std::string::npos ||
@@ -1122,7 +1109,6 @@ void BoxApp::Draw(const GameTimer& gt)
 
             mRenderingSystem.SetShadowPassConstants(mCommandList.Get(), sc, shadowCbIndex++);
 
-            // Передаем текстуру объекта в проход теней
             CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
             texHandle.Offset(ri.TexSrvIndex, srvSize);
             mCommandList->SetGraphicsRootDescriptorTable(1, texHandle);
@@ -1131,7 +1117,6 @@ void BoxApp::Draw(const GameTimer& gt)
             mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
         }
 
-        // Инстансированные объекты с активным флагом CastShadow (биллборды людей)
         for (const auto& ri : mInstancedItems)
         {
             if (!ri.CastShadow || !ri.IsVisible) continue;
@@ -1247,7 +1232,7 @@ void BoxApp::Draw(const GameTimer& gt)
         XMStoreFloat4x4(&gc.WorldViewProj, XMMatrixTranspose(worldMat * view * proj));
         XMStoreFloat4x4(&gc.World, XMMatrixTranspose(worldMat));
         XMStoreFloat4x4(&gc.WorldInvTranspose, MathHelper::InverseTranspose(worldMat));
-        gc.pad.x = 2.0f; // Флаг биллборда
+        gc.pad.x = 2.0f;
 
         mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), gc, geomCbIndex++);
 
@@ -1317,7 +1302,7 @@ void BoxApp::Draw(const GameTimer& gt)
     mRenderingSystem.EndGeometryPass(mCommandList.Get());
 
     // ---------------------------------------------------------------------------
-    //  Lighting Pass
+    //  Lighting Pass (Запись во вспомогательный буфер)
     // ---------------------------------------------------------------------------
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         mDepthStencilBuffer.Get(),
@@ -1329,25 +1314,19 @@ void BoxApp::Draw(const GameTimer& gt)
         mCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
     }
 
-    mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
-        CurrentBackBuffer(),
-        D3D12_RESOURCE_STATE_PRESENT,
-        D3D12_RESOURCE_STATE_RENDER_TARGET));
-    mCommandList->ClearRenderTargetView(CurrentBackBufferView(), Colors::Black, 0, nullptr);
-
     mRenderingSystem.ClearLights();
     mRenderingSystem.AddDirectionalLight({ 0.01f, -1.0f, 0.01f }, { 1.0f, 0.95f, 0.8f }, 1.0f);
     mRenderingSystem.AddPointLight({ 0.0f,2.0f, 0.0f }, { 1.0f,0.2f,0.1f }, 3.0f, 8.0f);
     mRenderingSystem.AddPointLight({ 5.0f,2.0f,-3.0f }, { 0.1f,0.5f,1.0f }, 2.0f, 6.0f);
     mRenderingSystem.AddSpotLight({ 0.0f,5.0f,0.0f }, { 0.0f,-1.0f,0.0f }, { 1.0f,1.0f,0.8f }, 5.0f, 10.0f, 30.0f);
 
-    XMMATRIX invView = XMMatrixInverse(nullptr, view);
-    XMMATRIX invProj = XMMatrixInverse(nullptr, proj);
-    XMMATRIX invViewProj = XMMatrixInverse(nullptr, view * proj);
+    XMMATRIX invViewMat = XMMatrixInverse(nullptr, view);
+    XMMATRIX invProjMat = XMMatrixInverse(nullptr, proj);
+    XMMATRIX invViewProjMat = XMMatrixInverse(nullptr, view * proj);
     XMFLOAT4X4 ivp, iv, ip;
-    XMStoreFloat4x4(&ivp, XMMatrixTranspose(invViewProj));
-    XMStoreFloat4x4(&iv, XMMatrixTranspose(invView));
-    XMStoreFloat4x4(&ip, XMMatrixTranspose(invProj));
+    XMStoreFloat4x4(&ivp, XMMatrixTranspose(invViewProjMat));
+    XMStoreFloat4x4(&iv, XMMatrixTranspose(invViewMat));
+    XMStoreFloat4x4(&ip, XMMatrixTranspose(invProjMat));
 
     const int kBaseLights = 4;
     int shotBudget = kMaxLights - kBaseLights;
@@ -1371,6 +1350,39 @@ void BoxApp::Draw(const GameTimer& gt)
         mCommandList.Get(), CurrentBackBufferView(), DepthStencilView(),
         mEyePosW, ivp, iv, ip, mDepthSrvGpuHandle,
         mShadowMap.SRV(), mLightViewProj, mCascadeSplitDepths);
+
+    //  Post-Processing Pass 
+
+    mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+        CurrentBackBuffer(),
+        D3D12_RESOURCE_STATE_PRESENT,
+        D3D12_RESOURCE_STATE_RENDER_TARGET));
+
+    mCommandList->ClearRenderTargetView(CurrentBackBufferView(), Colors::Black, 0, nullptr);
+
+    XMVECTOR sunDir = XMVectorSet(0.01f, -1.0f, 0.01f, 0.0f);
+    XMVECTOR sunPosW = XMVectorScale(XMVectorNegate(sunDir), 1000.0f);
+    XMMATRIX viewProj = view * proj;
+    XMVECTOR sunPosH = XMVector3TransformCoord(sunPosW, viewProj);
+
+    float lX = XMVectorGetX(sunPosH) * 0.5f + 0.5f;
+    float lY = -XMVectorGetY(sunPosH) * 0.5f + 0.5f;
+    float lZ = XMVectorGetZ(sunPosH);
+
+    DirectX::XMFLOAT2 sunScreenPos = { lX, lY };
+    bool sunVisible = (lZ > 0.0f && lX >= -0.1f && lX <= 1.1f && lY >= -0.1f && lY <= 1.1f);
+
+    // Выполняем пост-процесс
+    mRenderingSystem.DoPostProcessPass(
+        mCommandList.Get(),
+        CurrentBackBufferView(),
+        mEnableThermal,
+        mEnableChromatic,
+        mEnableLensFlare,
+        sunScreenPos,
+        sunVisible,
+        gt.TotalTime()
+    );
 
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         mDepthStencilBuffer.Get(),
@@ -1447,7 +1459,7 @@ void BoxApp::BuildInstancedItems() {
                 ri.SubmeshName = "billboard";
                 ri.TexSrvIndex = billboardTexIndex;
                 ri.UseTess = false;
-                ri.CastShadow = true; // Билборды людей теперь отбрасывают тени
+                ri.CastShadow = true;
 
                 XMMATRIX w = XMMatrixTranslation(x * 8.0f - 40.0f, y * 3.0f + 1.0f, z * 8.0f + 20.0f);
                 XMStoreFloat4x4(&ri.World, w);
