@@ -1,4 +1,4 @@
-// tessellation.hlsl
+// Shaders/tessellation.hlsl
 Texture2D    gDiffuseMap     : register(t0);
 Texture2D    gNormalMap      : register(t1);
 Texture2D    gDisplaceMap    : register(t2);
@@ -10,8 +10,8 @@ cbuffer cbPerObject : register(b0)
     float4x4 gWorld;
     float4x4 gWorldInvTranspose;
     float     gTime;
-    float     gIsAnimated; // Используем первый компонент из float3 pad
-    float2    gPad2;       // Остаток паддинга
+    float     gIsAnimated;
+    float2    gPad2;
 };
 
 cbuffer cbTessellation : register(b1)
@@ -87,10 +87,10 @@ HS_TESS_FACTORS ConstantsHS(InputPatch<VS_OUT, 3> patch, uint PatchID : SV_Primi
 }
 
 [domain("tri")]
-[partitioning("fractional_odd")] // плавная тесселяция
-[outputtopology("triangle_cw")] // порядок вершин триуг
-[outputcontrolpoints(3)] // 3 запуска по колич верш триуг
-[patchconstantfunc("ConstantsHS")] // коэф тессел
+[partitioning("fractional_odd")]
+[outputtopology("triangle_cw")]
+[outputcontrolpoints(3)]
+[patchconstantfunc("ConstantsHS")]
 [maxtessfactor(64.0)]
 HS_OUT HS(InputPatch<VS_OUT, 3> patch, uint uCPID : SV_OutputControlPointID)
 {
@@ -116,17 +116,14 @@ DS_OUT DS(HS_TESS_FACTORS input, float3 bary : SV_DomainLocation, const OutputPa
 {
     DS_OUT Out;
 
- 
     float3 posW    = bary.x * tri[0].PosW    + bary.y * tri[1].PosW    + bary.z * tri[2].PosW;
     float3 normalW = bary.x * tri[0].NormalW + bary.y * tri[1].NormalW + bary.z * tri[2].NormalW;
     float2 texC    = bary.x * tri[0].TexC    + bary.y * tri[1].TexC    + bary.z * tri[2].TexC;
     float3 tangW   = bary.x * tri[0].TangentW+ bary.y * tri[1].TangentW+ bary.z * tri[2].TangentW;
 
-   
     normalW = normalize(normalW);
 
     float mask = gDisplaceMap.SampleLevel(gsamLinear, texC, 0).r;
-       
     float hDir = (mask * 5.0f) - 1.0f;
 
     float freq = 5.0f;
@@ -137,7 +134,7 @@ DS_OUT DS(HS_TESS_FACTORS input, float3 bary : SV_DomainLocation, const OutputPa
     posW += normalW * offset;
 
     Out.PosW     = posW;
-    Out.PosH     = mul(float4(posW, 1.0f), gWorldViewProj); // Проекция в пространство экрана
+    Out.PosH     = mul(float4(posW, 1.0f), gWorldViewProj);
     Out.NormalW  = normalW;
     Out.TexC     = texC;
     Out.TangentW = normalize(tangW);
@@ -156,21 +153,18 @@ PSOutput PS(DS_OUT pin)
 {
      PSOutput output;
 
-    // Проверяем флаг (мы его ставили только для плоскости в C++)
     if (gIsAnimated > 0.5f) 
     {
         float mask = gDisplaceMap.Sample(gsamLinear, pin.TexC).r;
-
         output.Albedo = float4(mask, 0.0f, 0.0f, 1.0f);
-
-        output.Normal = float4(0, 1, 0, 0); // Считаем, что нормаль смотрит строго вверх
-        output.Specular = float4(0, 0, 0, 0); // Никаких белых точек/бликов
+        output.Normal = float4(0, 1, 0, 0); 
+        output.Specular = float4(0.0f, 0.9f, 1.0f, 1.0f); // Диэлектрическая шершавая плоскость
     }
     else 
     {
         output.Albedo = gDiffuseMap.Sample(gsamLinear, pin.TexC);
         output.Normal = float4(pin.NormalW, 0.0f);
-        output.Specular = float4(0.3f, 0.3f, 0.3f, 1.0f);
+        output.Specular = float4(0.0f, 0.3f, 1.0f, 1.0f); // Диэлектрическая гладкая поверхность
     }
 
     return output;

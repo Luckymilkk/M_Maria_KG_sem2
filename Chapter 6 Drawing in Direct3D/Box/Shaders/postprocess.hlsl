@@ -15,7 +15,6 @@ cbuffer cbPostProcess : register(b0)
 
 struct VertexOut { float4 PosH : SV_POSITION; float2 TexC : TEXCOORD; };
 
-// ГЕНЕРАЦИЯ ПОЛНОЭКРАННОГО ТРЕУГОЛЬНИКА БЕЗ ВЕРШИННОГО БУФЕРА
 VertexOut VS(uint vertexID : SV_VertexID)
 {
     VertexOut vout;
@@ -47,7 +46,6 @@ float4 PS(VertexOut pin) : SV_Target
     float2 uv = pin.TexC;
     float3 color = float3(0.0f, 0.0f, 0.0f);
 
-    // 1. Хроматическая аберрация
     if (gEnableChromatic > 0)
     {
         float2 toCenter = uv - 0.5f;
@@ -69,14 +67,12 @@ float4 PS(VertexOut pin) : SV_Target
         color = gLightOutput.Sample(gsamLinear, uv).rgb;
     }
 
-    // 2. Тепловизор
     if (gEnableThermal > 0)
     {
         float lum = dot(color, float3(0.299f, 0.587f, 0.114f));
         color = GetThermalColor(lum);
     }
 
-    // 3. Простой спрайтовый вариант Lens Flare
     if (gEnableLensFlare > 0 && gLightVisible > 0.5f)
     {
         float2 lightPos = gLightScreenPos;
@@ -112,7 +108,8 @@ float4 PS(VertexOut pin) : SV_Target
         color += flares;
     }
 
-    // 4. Гамма-коррекция
+    color = color / (color + float3(1.0f, 1.0f, 1.0f));
+
     color = pow(abs(color), 1.0f / 2.2f);
 
     return float4(color, 1.0f);

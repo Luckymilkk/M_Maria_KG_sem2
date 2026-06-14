@@ -16,10 +16,8 @@ struct LightData
 {
     DirectX::XMFLOAT3 Position;
     float             Range;
-
     DirectX::XMFLOAT3 Direction;
     float             SpotAngle;
-
     DirectX::XMFLOAT3 Color;
     int               Type;
 };
@@ -37,7 +35,6 @@ struct TessellationConstants
 {
     DirectX::XMFLOAT3 EyePosW = { 0,0,0 };
     float             DisplaceScale = 0.05f;
-
     float MinTessDist = 2.0f;
     float MaxTessDist = 50.0f;
     float MinTess = 1.0f;
@@ -114,51 +111,20 @@ public:
 
     void ClearLights() { mLights.clear(); }
 
-    void AddDirectionalLight(DirectX::XMFLOAT3 direction,
-        DirectX::XMFLOAT3 color,
-        float intensity);
+    void AddDirectionalLight(DirectX::XMFLOAT3 direction, DirectX::XMFLOAT3 color, float intensity);
+    void AddPointLight(DirectX::XMFLOAT3 position, DirectX::XMFLOAT3 color, float intensity, float range);
+    void AddSpotLight(DirectX::XMFLOAT3 position, DirectX::XMFLOAT3 direction, DirectX::XMFLOAT3 color, float intensity, float range, float spotAngleDegrees);
 
-    void AddPointLight(DirectX::XMFLOAT3 position,
-        DirectX::XMFLOAT3 color,
-        float intensity,
-        float range);
-
-    void AddSpotLight(DirectX::XMFLOAT3 position,
-        DirectX::XMFLOAT3 direction,
-        DirectX::XMFLOAT3 color,
-        float intensity,
-        float range,
-        float spotAngleDegrees);
-
-    void BeginGeometryPass(ID3D12GraphicsCommandList* cmdList,
-        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle);
-
+    void BeginGeometryPass(ID3D12GraphicsCommandList* cmdList, D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle);
     void EndGeometryPass(ID3D12GraphicsCommandList* cmdList);
 
-    void SetGeometryPassConstants(
-        ID3D12GraphicsCommandList* cmdList,
-        const GeometryPassConstants& constants,
-        UINT cbIndex);
+    void SetGeometryPassConstants(ID3D12GraphicsCommandList* cmdList, const GeometryPassConstants& constants, UINT cbIndex);
 
-    void BeginTessellationPass(
-        ID3D12GraphicsCommandList* cmdList,
-        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle);
+    void BeginTessellationPass(ID3D12GraphicsCommandList* cmdList, D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle);
+    void SetTessellationConstants(ID3D12GraphicsCommandList* cmdList, const GeometryPassConstants& geomConsts, UINT geomCbIndex, const TessellationConstants& tessConsts, UINT tessIndex = 0);
 
-    void SetTessellationConstants(
-        ID3D12GraphicsCommandList* cmdList,
-        const GeometryPassConstants& geomConsts,
-        UINT geomCbIndex,
-        const TessellationConstants& tessConsts,
-        UINT tessIndex = 0);
-
-    void BeginShadowPass(ID3D12GraphicsCommandList* cmdList,
-        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle,
-        D3D12_VIEWPORT viewport, D3D12_RECT scissor);
-
-    void SetShadowPassConstants(
-        ID3D12GraphicsCommandList* cmdList,
-        const ShadowPassConstants& constants,
-        UINT cbIndex);
+    void BeginShadowPass(ID3D12GraphicsCommandList* cmdList, D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle, D3D12_VIEWPORT viewport, D3D12_RECT scissor);
+    void SetShadowPassConstants(ID3D12GraphicsCommandList* cmdList, const ShadowPassConstants& constants, UINT cbIndex);
 
     ID3D12RootSignature* GetGeometryRootSignature() const { return mGeometryRootSig.Get(); }
     ID3D12PipelineState* GetGeometryPSO()           const { return mGeometryPSO.Get(); }
@@ -179,6 +145,7 @@ public:
         DirectX::XMFLOAT4X4 invProj,
         D3D12_GPU_DESCRIPTOR_HANDLE depthSrvHandle,
         D3D12_GPU_DESCRIPTOR_HANDLE shadowSrvHandle,
+        D3D12_GPU_DESCRIPTOR_HANDLE iblSrvHandle, // Передаем IBL-дескрипторы
         const DirectX::XMMATRIX* lightViewProjMats,
         const float* splitDepths);
 
@@ -193,14 +160,12 @@ public:
 
 private:
     void BuildGeometryPassPSO(ID3D12Device* device, DXGI_FORMAT depthStencilFormat);
-    void BuildLightingPassPSO(ID3D12Device* device, DXGI_FORMAT backBufferFormat,
-        DXGI_FORMAT depthStencilFormat);
+    void BuildLightingPassPSO(ID3D12Device* device, DXGI_FORMAT backBufferFormat, DXGI_FORMAT depthStencilFormat);
     void BuildTessellationPSO(ID3D12Device* device, DXGI_FORMAT depthStencilFormat);
     void BuildShadowPSO(ID3D12Device* device);
     void BuildPostProcessPSO(ID3D12Device* device, DXGI_FORMAT backBufferFormat);
     void BuildRootSignatures(ID3D12Device* device);
-    void BuildOffscreenResources(ID3D12Device* device, UINT width, UINT height,
-        ID3D12DescriptorHeap* rtvHeap, ID3D12DescriptorHeap* srvHeap);
+    void BuildOffscreenResources(ID3D12Device* device, UINT width, UINT height, ID3D12DescriptorHeap* rtvHeap, ID3D12DescriptorHeap* srvHeap);
 
     GBuffer mGBuffer;
 

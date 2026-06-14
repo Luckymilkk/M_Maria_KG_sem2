@@ -2,6 +2,7 @@
 // BoxApp.cpp
 // Deferred rendering with Sponza + tessellation (displacement + normal map + distance LOD)
 // CSM (Cascaded Shadow Maps) implementation with non-linear split and PCF filtering
+// Fully updated to Physically Based Rendering (PBR) and Image-Based Lighting (IBL)
 //***************************************************************************************
 #include "Common/d3dApp.h"
 #include "Common/MathHelper.h"
@@ -118,7 +119,20 @@ private:
     static const UINT mGbufferSrvOffset = 0;
     static const UINT mDepthSrvOffset = GBuffer::NumRTs;
     static const UINT mShadowSrvOffset = GBuffer::NumRTs + 1;
-    static const UINT mOffscreenSrvOffset = GBuffer::NumRTs + 2; // индекс 5
+    static const UINT mOffscreenSrvOffset = GBuffer::NumRTs + 2;
+
+    // Новые индексы дескрипторов для IBL
+    static const UINT mIrradianceSrvOffset = GBuffer::NumRTs + 3;
+    static const UINT mPrefilterSrvOffset = GBuffer::NumRTs + 4;
+    static const UINT mBrdfLutSrvOffset = GBuffer::NumRTs + 5;
+
+    // Ресурсы IBL текстур
+    ComPtr<ID3D12Resource> mIrradianceMapTex = nullptr;
+    ComPtr<ID3D12Resource> mIrradianceMapUploadHeap = nullptr;
+    ComPtr<ID3D12Resource> mPrefilterMapTex = nullptr;
+    ComPtr<ID3D12Resource> mPrefilterMapUploadHeap = nullptr;
+    ComPtr<ID3D12Resource> mBrdfLutTex = nullptr;
+    ComPtr<ID3D12Resource> mBrdfLutUploadHeap = nullptr;
 
     std::vector<std::unique_ptr<MyTexture>> mAllTextures;
     std::unique_ptr<MeshGeometry>           mModelGeo = nullptr;
@@ -324,8 +338,9 @@ void BoxApp::BuildDescriptorHeaps()
     rtvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&mGbufferRtvHeap)));
 
+    // Увеличиваем размер кучи, чтобы разместить GBuffer, глубину, CSM, Offscreen и 3 текстуры IBL
     D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
-    srvDesc.NumDescriptors = GBuffer::NumRTs + 3; // GBuffer SRVs (3) + depth (1) + CSM (1) + Offscreen SRV (1)
+    srvDesc.NumDescriptors = GBuffer::NumRTs + 6; // 3 GBuffer + depth (1) + CSM (1) + Offscreen (1) + 3 IBL
     srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&mSrvHeap)));
@@ -351,9 +366,64 @@ void BoxApp::BuildDescriptorHeaps()
 
     mShadowMap.Init(md3dDevice.Get(), 2048, 2048, mDsvHeap.Get(), 0, mSrvHeap.Get(), mShadowSrvOffset);
 
-    UINT srvSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    CD3DX12_CPU_DESCRIPTOR_HANDLE hDesc(mObjectSrvHeap->GetCPUDescriptorHandleForHeapStart());
+    // Загрузка предрассчитанных текстур для IBL
+    ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(
+        md3dDevice.Get(), mCommandList.Get(),
+        L"IrradianceMap_BC6U.dds", mIrradianceMapTex, mIrradianceMapUploadHeap));
 
+    ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(
+        md3dDevice.Get(), mCommandList.Get(),
+        L"PreFilteredEnvMap_BC6U.dds", mPrefilterMapTex, mPrefilterMapUploadHeap));
+
+    ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(
+        md3dDevice.Get(), mCommandList.Get(),
+        L"IntegrationMap.dds", mBrdfLutTex, mBrdfLutUploadHeap));
+
+    UINT srvSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    // Создаем SRV для IBL-текстур
+    // 1. Irradiance Map
+    {
+        CD3DX12_CPU_DESCRIPTOR_HANDLE hCpu(mSrvHeap->GetCPUDescriptorHandleForHeapStart());
+        hCpu.Offset(mIrradianceSrvOffset, srvSize);
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format = mIrradianceMapTex->GetDesc().Format;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        srvDesc.TextureCube.MostDetailedMip = 0;
+        srvDesc.TextureCube.MipLevels = mIrradianceMapTex->GetDesc().MipLevels;
+        //srvDesc.TextureCube.ResourceMinLODPixels = 0.0f;
+        md3dDevice->CreateShaderResourceView(mIrradianceMapTex.Get(), &srvDesc, hCpu);
+    }
+    // 2. Prefiltered Map
+    {
+        CD3DX12_CPU_DESCRIPTOR_HANDLE hCpu(mSrvHeap->GetCPUDescriptorHandleForHeapStart());
+        hCpu.Offset(mPrefilterSrvOffset, srvSize);
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format = mPrefilterMapTex->GetDesc().Format;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        srvDesc.TextureCube.MostDetailedMip = 0;
+        srvDesc.TextureCube.MipLevels = mPrefilterMapTex->GetDesc().MipLevels;
+       // srvDesc.TextureCube.ResourceMinLODPixels = 0.0f;
+        md3dDevice->CreateShaderResourceView(mPrefilterMapTex.Get(), &srvDesc, hCpu);
+    }
+    // 3. BRDF Integration LUT Map
+    {
+        CD3DX12_CPU_DESCRIPTOR_HANDLE hCpu(mSrvHeap->GetCPUDescriptorHandleForHeapStart());
+        hCpu.Offset(mBrdfLutSrvOffset, srvSize);
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format = mBrdfLutTex->GetDesc().Format;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MostDetailedMip = 0;
+        srvDesc.Texture2D.MipLevels = mBrdfLutTex->GetDesc().MipLevels;
+        srvDesc.Texture2D.PlaneSlice = 0;
+       // srvDesc.Texture2D.ResourceMinLODPixels = 0.0f;
+        md3dDevice->CreateShaderResourceView(mBrdfLutTex.Get(), &srvDesc, hCpu);
+    }
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE hDesc(mObjectSrvHeap->GetCPUDescriptorHandleForHeapStart());
     for (int i = 0; i < (int)mAllTextures.size(); ++i)
     {
         auto& tex = mAllTextures[i];
@@ -774,7 +844,6 @@ void BoxApp::BuildModelGeometry()
             v.Normal = { 0.0f, 1.0f, 0.0f };
             v.TexC = gv.TexC;
             v.Tangent = { 1.0f, 0.0f, 0.0f };
-
             allVertices.push_back(v);
         }
         for (uint32_t ix : grid.Indices32)
@@ -892,9 +961,9 @@ LRESULT BoxApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             mShotLights.clear();
             mShotCount = 0;
         }
-        if (wParam == VK_OEM_4) // [
+        if (wParam == VK_OEM_4)
             mTessDisplaceScale = MathHelper::Max(0.0f, mTessDisplaceScale - 0.01f);
-        if (wParam == VK_OEM_6) // ]
+        if (wParam == VK_OEM_6)
             mTessDisplaceScale += 0.01f;
         if (wParam == VK_PRIOR)
             mTessMaxTess = MathHelper::Min(64.0f, mTessMaxTess + 1.0f);
@@ -921,7 +990,6 @@ void BoxApp::ComputeCascades(
 
     DirectX::XMVECTOR camPos = DirectX::XMLoadFloat3(&mCurrCameraPos);
     DirectX::XMVECTOR lightPos = DirectX::XMVectorSubtract(camPos, DirectX::XMVectorScale(lightDir, 1000.0f));
-
     DirectX::XMMATRIX lightView = DirectX::XMMatrixLookAtLH(lightPos, camPos, DirectX::XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f));;
 
     for (int i = 0; i < 3; ++i)
@@ -1006,7 +1074,6 @@ void BoxApp::Update(const GameTimer& gt)
     std::wstring modeName = (mCullingMode == CullingMode::None) ? L"None" :
         (mCullingMode == CullingMode::BruteForce) ? L"BruteForce" : L"Octree";
 
-    // Выводим информацию по активным пост-эффектам в заголовок окна
     std::wstring stats = L"Culling: " + modeName +
         L" | Visible: " + std::to_wstring(visibleCount) + L"/" + std::to_wstring(mInstancedItems.size()) +
         L" | FX: [4] Thermal: " + (mEnableThermal ? L"ON" : L"OFF") +
@@ -1063,7 +1130,7 @@ void BoxApp::Draw(const GameTimer& gt)
     ThrowIfFailed(mCommandList->Reset(mDirectCmdListAlloc.Get(), nullptr));
 
     // ---------------------------------------------------------------------------
-    //  CSM Shadow Pass (рендеринг в массив текстур теней)
+    //  CSM Shadow Pass
     // ---------------------------------------------------------------------------
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         mShadowMap.Resource(),
@@ -1106,7 +1173,6 @@ void BoxApp::Draw(const GameTimer& gt)
                 ri.SubmeshName.find("ivy") != std::string::npos);
 
             sc.UseAlphaTest = isAlphaTested ? 1.0f : 0.0f;
-
             mRenderingSystem.SetShadowPassConstants(mCommandList.Get(), sc, shadowCbIndex++);
 
             CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
@@ -1127,7 +1193,6 @@ void BoxApp::Draw(const GameTimer& gt)
 
             bool isAlphaTested = (ri.SubmeshName == "billboard");
             sc.UseAlphaTest = isAlphaTested ? 1.0f : 0.0f;
-
             mRenderingSystem.SetShadowPassConstants(mCommandList.Get(), sc, shadowCbIndex++);
 
             CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
@@ -1207,6 +1272,7 @@ void BoxApp::Draw(const GameTimer& gt)
         XMStoreFloat4x4(&shotConsts.World, XMMatrixTranspose(shotWorld));
         XMStoreFloat4x4(&shotConsts.WorldInvTranspose, XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, shotWorld))));
         shotConsts.Time = gt.TotalTime();
+        shotConsts.pad.y = 1.0f; // Передаем флаг для активации PBR-характеристик золотого металла
 
         mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), shotConsts, geomCbIndex++);
 
@@ -1302,7 +1368,7 @@ void BoxApp::Draw(const GameTimer& gt)
     mRenderingSystem.EndGeometryPass(mCommandList.Get());
 
     // ---------------------------------------------------------------------------
-    //  Lighting Pass (Запись во вспомогательный буфер)
+    //  Lighting Pass (Запись во вспомогательный буфер с расчетом PBR + IBL)
     // ---------------------------------------------------------------------------
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         mDepthStencilBuffer.Get(),
@@ -1346,13 +1412,18 @@ void BoxApp::Draw(const GameTimer& gt)
         --shotBudget;
     }
 
+    // Получаем GPU-дескриптор начала IBL текстур (они расположены последовательно в куче SRV)
+    CD3DX12_GPU_DESCRIPTOR_HANDLE iblSrvHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
+    iblSrvHandle.Offset(mIrradianceSrvOffset, srvSize);
+
     mRenderingSystem.DoLightingPass(
         mCommandList.Get(), CurrentBackBufferView(), DepthStencilView(),
         mEyePosW, ivp, iv, ip, mDepthSrvGpuHandle,
-        mShadowMap.SRV(), mLightViewProj, mCascadeSplitDepths);
+        mShadowMap.SRV(), iblSrvHandle, mLightViewProj, mCascadeSplitDepths);
 
+    // ---------------------------------------------------------------------------
     //  Post-Processing Pass 
-
+    // ---------------------------------------------------------------------------
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         CurrentBackBuffer(),
         D3D12_RESOURCE_STATE_PRESENT,
@@ -1372,7 +1443,6 @@ void BoxApp::Draw(const GameTimer& gt)
     DirectX::XMFLOAT2 sunScreenPos = { lX, lY };
     bool sunVisible = (lZ > 0.0f && lX >= -0.1f && lX <= 1.1f && lY >= -0.1f && lY <= 1.1f);
 
-    // Выполняем пост-процесс
     mRenderingSystem.DoPostProcessPass(
         mCommandList.Get(),
         CurrentBackBufferView(),
@@ -1440,7 +1510,6 @@ void BoxApp::BuildInstancedItems() {
     mInstancedItems.clear();
 
     int nX = 6, nY = 6, nZ = 6;
-
     int billboardTexIndex = 0;
     for (int i = 0; i < (int)mAllTextures.size(); ++i) {
         if (mAllTextures[i]->Name == "human_sprite") {

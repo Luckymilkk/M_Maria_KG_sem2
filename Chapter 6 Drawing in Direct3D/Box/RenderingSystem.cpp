@@ -129,10 +129,8 @@ void RenderingSystem::BeginTessellationPass(
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle)
 {
     mGBuffer.BindAsRenderTargets(cmdList, dsvHandle);
-
     cmdList->SetPipelineState(mTessPSO.Get());
     cmdList->SetGraphicsRootSignature(mTessRootSig.Get());
-
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
 }
 
@@ -198,6 +196,7 @@ void RenderingSystem::DoLightingPass(
     XMFLOAT4X4 invProj,
     D3D12_GPU_DESCRIPTOR_HANDLE depthSrvHandle,
     D3D12_GPU_DESCRIPTOR_HANDLE shadowSrvHandle,
+    D3D12_GPU_DESCRIPTOR_HANDLE iblSrvHandle, // IBL SRV
     const XMMATRIX* lightViewProjMats,
     const float* splitDepths)
 {
@@ -233,8 +232,8 @@ void RenderingSystem::DoLightingPass(
     cmdList->SetGraphicsRootDescriptorTable(1, mGBuffer.GetSRVTable());
     cmdList->SetGraphicsRootDescriptorTable(2, depthSrvHandle);
     cmdList->SetGraphicsRootDescriptorTable(3, shadowSrvHandle);
+    cmdList->SetGraphicsRootDescriptorTable(4, iblSrvHandle); // Назначаем IBL текстуры
 
-    // ВЕРШИННЫЙ БУФЕР НЕ БИНДИТСЯ. Отрисовывается ровно 3 вершины
     cmdList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList->DrawInstanced(3, 1, 0, 0);
 
@@ -271,7 +270,6 @@ void RenderingSystem::DoPostProcessPass(
     cmdList->SetGraphicsRootConstantBufferView(0, mPostProcessCB->Resource()->GetGPUVirtualAddress());
     cmdList->SetGraphicsRootDescriptorTable(1, mOffscreenSrvHandle);
 
-    // ВЕРШИННЫЙ БУФЕР НЕ БИНДИТСЯ. Отрисовывается ровно 3 вершины
     cmdList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList->DrawInstanced(3, 1, 0, 0);
 }
@@ -297,22 +295,27 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
     }
 
     {
+        // Сигнатура для фазы Lighting
         CD3DX12_DESCRIPTOR_RANGE gbufTable;
-        gbufTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::NumRTs, 0);
+        gbufTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::NumRTs, 0); // t0-t2
 
         CD3DX12_DESCRIPTOR_RANGE depthTable;
-        depthTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, GBuffer::NumRTs);
+        depthTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, GBuffer::NumRTs); // t3
 
         CD3DX12_DESCRIPTOR_RANGE shadowTable;
-        shadowTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, GBuffer::NumRTs + 1);
+        shadowTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, GBuffer::NumRTs + 1); // t4
 
-        CD3DX12_ROOT_PARAMETER params[4];
+        CD3DX12_DESCRIPTOR_RANGE iblTable;
+        iblTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, GBuffer::NumRTs + 2); // t5-t7 для IBL
+
+        CD3DX12_ROOT_PARAMETER params[5];
         params[0].InitAsConstantBufferView(0);
         params[1].InitAsDescriptorTable(1, &gbufTable, D3D12_SHADER_VISIBILITY_PIXEL);
         params[2].InitAsDescriptorTable(1, &depthTable, D3D12_SHADER_VISIBILITY_PIXEL);
         params[3].InitAsDescriptorTable(1, &shadowTable, D3D12_SHADER_VISIBILITY_PIXEL);
+        params[4].InitAsDescriptorTable(1, &iblTable, D3D12_SHADER_VISIBILITY_PIXEL);
 
-        CD3DX12_STATIC_SAMPLER_DESC samplers[2];
+        CD3DX12_STATIC_SAMPLER_DESC samplers[3];
         samplers[0] = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_POINT);
         samplers[1] = CD3DX12_STATIC_SAMPLER_DESC(
             1,
@@ -325,8 +328,9 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
             D3D12_COMPARISON_FUNC_LESS_EQUAL,
             D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE
         );
+        samplers[2] = CD3DX12_STATIC_SAMPLER_DESC(2, D3D12_FILTER_MIN_MAG_MIP_LINEAR); // Линейный сэмплер для IBL
 
-        CD3DX12_ROOT_SIGNATURE_DESC desc(4, params, 2, samplers,
+        CD3DX12_ROOT_SIGNATURE_DESC desc(5, params, 3, samplers,
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
         ComPtr<ID3DBlob> serial, err;
@@ -419,7 +423,6 @@ void RenderingSystem::BuildLightingPassPSO(ID3D12Device* device,
     mLightPS = d3dUtil::CompileShader(L"Shaders\\lighting.hlsl", nullptr, "PS", "ps_5_1");
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-    // УКАЗЫВАЕМ NULL ДЛЯ ВХОДНОГО МАКЕТА - вершинного буфера нет!
     psoDesc.InputLayout = { nullptr, 0 };
     psoDesc.pRootSignature = mLightingRootSig.Get();
     psoDesc.VS = { mLightVS->GetBufferPointer(), mLightVS->GetBufferSize() };
@@ -471,7 +474,6 @@ void RenderingSystem::BuildTessellationPSO(ID3D12Device* device, DXGI_FORMAT dep
     psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
     psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     psoDesc.SampleMask = UINT_MAX;
-
     psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
 
     psoDesc.NumRenderTargets = GBuffer::NumRTs;
@@ -493,7 +495,6 @@ void RenderingSystem::BuildShadowPSO(ID3D12Device* device)
     params[1].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
 
     auto sampler = CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
-
     CD3DX12_ROOT_SIGNATURE_DESC desc(2, params, 1, &sampler,
         D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
@@ -519,7 +520,6 @@ void RenderingSystem::BuildShadowPSO(ID3D12Device* device)
     psoDesc.PS = { mShadowPS->GetBufferPointer(), mShadowPS->GetBufferSize() };
 
     psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-
     psoDesc.RasterizerState.DepthBias = 1500;
     psoDesc.RasterizerState.DepthBiasClamp = 0.0f;
     psoDesc.RasterizerState.SlopeScaledDepthBias = 1.5f;
@@ -541,7 +541,6 @@ void RenderingSystem::BuildPostProcessPSO(ID3D12Device* device, DXGI_FORMAT back
     mPostProcessPS = d3dUtil::CompileShader(L"Shaders\\postprocess.hlsl", nullptr, "PS", "ps_5_1");
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-    // УКАЗЫВАЕМ NULL ДЛЯ ВХОДНОГО МАКЕТА - вершинного буфера нет!
     psoDesc.InputLayout = { nullptr, 0 };
     psoDesc.pRootSignature = mPostProcessRootSig.Get();
     psoDesc.VS = { mPostProcessVS->GetBufferPointer(), mPostProcessVS->GetBufferSize() };
