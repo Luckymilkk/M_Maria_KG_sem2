@@ -5,7 +5,6 @@ Texture2D          gSpecular : register(t2); // R = Metallic, G = Roughness, B =
 Texture2D<float>   gDepth    : register(t3);
 Texture2DArray     gShadowMap: register(t4); // CSM shadow map array
 
-// Текстуры для IBL
 TextureCube        gIrradianceMap : register(t5);
 TextureCube        gPrefilterMap  : register(t6);
 Texture2D          gBRDF_LUT      : register(t7);
@@ -77,7 +76,6 @@ float CalcAttenuation(float distance, float range)
     return falloff * falloff;
 }
 
-// Функции PBR
 float3 fresnelSchlick(float cosTheta, float3 F0)
 {
     return F0 + (1.0f - F0) * pow(clamp(1.0f - cosTheta, 0.0f, 1.0f), 5.0f);
@@ -168,7 +166,6 @@ float4 PS(VertexOut pin) : SV_Target
     float3 nTex     = gNormal.Sample(gsamPoint, pin.TexC).xyz;
     float3 normal   = (dot(nTex, nTex) > 1e-6f) ? normalize(nTex) : float3(0.0f, 1.0f, 0.0f);
     
-    // Свойства материала из G-Buffer
     float4 specData  = gSpecular.Sample(gsamPoint, pin.TexC);
     float  metallic  = specData.r;
     float  roughness = max(specData.g, 0.04f); // избегаем деления на ноль при нулевой шероховатости
@@ -183,7 +180,6 @@ float4 PS(VertexOut pin) : SV_Target
 
     float3 totalLight = float3(0.0f, 0.0f, 0.0f);
 
-    // 1. Аналитические источники света (Direct Lighting)
     for (int i = 0; i < gNumLights; ++i)
     {
         LightData light = gLights[i];
@@ -236,23 +232,21 @@ float4 PS(VertexOut pin) : SV_Target
         totalLight += (kD * albedo.rgb / PI + specular) * radiance * NdotL;
     }
 
-    // 2. Расчет Image-Based Lighting (IBL)
     float3 F_ibl = fresnelSchlickRoughness(max(dot(normal, V), 0.0f), F0, roughness);
     float3 kS_ibl = F_ibl;
     float3 kD_ibl = 1.0f - kS_ibl;
     kD_ibl *= 1.0f - metallic;
 
-    // Диффузная часть IBL (Irradiance)
     float3 irradiance = gIrradianceMap.Sample(gsamLinear, normal).rgb;
     float3 diffuseIBL = irradiance * albedo.rgb;
 
     // Отраженная часть IBL (Prefilter + BRDF Integration LUT)
-    const float MAX_REFLECTION_LOD = 4.0f; // Mip-уровни предрассчитанного кубмапа
+    const float MAX_REFLECTION_LOD = 3.0f; 
     float3 prefilteredColor = gPrefilterMap.SampleLevel(gsamLinear, R, roughness * MAX_REFLECTION_LOD).rgb;
     float2 envBRDF  = gBRDF_LUT.Sample(gsamLinear, float2(max(dot(normal, V), 0.0f), roughness)).rg;
     float3 specularIBL = prefilteredColor * (F_ibl * envBRDF.x + envBRDF.y);
 
-    // Общее окружающее освещение с учетом самозатенения (AO)
+    // Общее окружающее освещение с учетом самозатенения
     float3 ambient = (kD_ibl * diffuseIBL + specularIBL) * ao;
     totalLight += ambient;
 

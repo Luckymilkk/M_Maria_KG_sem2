@@ -1,6 +1,9 @@
 // Shaders/gbuffer.hlsl
-Texture2D    gDiffuseMap : register(t0);
-SamplerState gsamLinear  : register(s0);
+Texture2D    gAlbedoMap   : register(t0);
+Texture2D    gNormalMap    : register(t1);
+Texture2D    gMetallicMap  : register(t2);
+Texture2D    gRoughnessMap : register(t3);
+SamplerState gsamLinear    : register(s0);
 
 cbuffer cbPerObject : register(b0)
 {
@@ -8,7 +11,7 @@ cbuffer cbPerObject : register(b0)
     float4x4 gWorld;
     float4x4 gWorldInvTranspose;
     float     gTime;
-    float3    gPad; // gPad.x - флаг билборда (2.0f), gPad.y - флаг звезды (1.0f)
+    float3    gPad;
 };
 
 struct VertexIn
@@ -59,14 +62,28 @@ struct PSOutput
 {
     float4 Albedo   : SV_Target0;
     float4 Normal   : SV_Target1;
-    float4 Specular : SV_Target2; // В PBR: R = Metallic, G = Roughness, B = AO
+    float4 Specular : SV_Target2; // R = Metallic, G = Roughness, B = AO
 };
+
+float3 NormalSampleToWorldSpace(float3 normalMapSample, float3 unitNormalW, float3 tangentW)
+{
+    float3 normalT = 2.0f * normalMapSample - 1.0f;
+
+    // Создаем ортонормированный базис TBN
+    float3 N = unitNormalW;
+    float3 T = normalize(tangentW - dot(tangentW, N) * N);
+    float3 B = cross(N, T);
+
+    float3x3 TBN = float3x3(T, B, N);
+
+    return normalize(mul(normalT, TBN));
+}
 
 PSOutput PS(VertexOut pin)
 {
     PSOutput output;
 
-    float4 albedo = gDiffuseMap.Sample(gsamLinear, pin.TexC);
+    float4 albedo = gAlbedoMap.Sample(gsamLinear, pin.TexC);
     clip(albedo.a - 0.1f);
 
     if (max(albedo.r, max(albedo.g, albedo.b)) < 0.03f)
@@ -74,25 +91,14 @@ PSOutput PS(VertexOut pin)
     
     output.Albedo = albedo;
 
-    float3 N = normalize(pin.NormalW);
-    output.Normal = float4(N, 0.0f);
+    // Карта нормалей (Рельеф)
+    float3 normalMapSample = gNormalMap.Sample(gsamLinear, pin.TexC).rgb;
+    float3 bumpedNormalW = NormalSampleToWorldSpace(normalMapSample, normalize(pin.NormalW), normalize(pin.TangentW));
+    output.Normal = float4(bumpedNormalW, 0.0f);
 
-    // Запись PBR параметров
-    if (gPad.y == 1.0f)
-    {
-        // Золотая металлическая звезда
-        output.Albedo = float4(1.00f, 0.71f, 0.29f, 1.0f);
-        output.Specular = float4(1.0f, 0.15f, 1.0f, 1.0f); // Metallic = 1.0, Roughness = 0.15, AO = 1.0
-    }
-    else if (gPad.x == 2.0f)
-    {
-        // Биллборды людей
-        output.Specular = float4(0.0f, 0.8f, 1.0f, 1.0f); // Metallic = 0.0, Roughness = 0.8, AO = 1.0
-    }
-    else
-    {
-        // Окружение Sponza (матовый диэлектрик)
-        output.Specular = float4(0.0f, 0.6f, 1.0f, 1.0f); // Metallic = 0.0, Roughness = 0.6, AO = 1.0
-    }
+    float metallic  = gMetallicMap.Sample(gsamLinear, pin.TexC).r;
+    float roughness = gRoughnessMap.Sample(gsamLinear, pin.TexC).r;
+
+    output.Specular = float4(metallic, roughness, 1.0f, 1.0f); // R=Metallic, G=Roughness, B=AO (default 1.0)
     return output;
 }

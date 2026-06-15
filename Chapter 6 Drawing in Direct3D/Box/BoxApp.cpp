@@ -3,6 +3,7 @@
 // Deferred rendering with Sponza + tessellation (displacement + normal map + distance LOD)
 // CSM (Cascaded Shadow Maps) implementation with non-linear split and PCF filtering
 // Fully updated to Physically Based Rendering (PBR) and Image-Based Lighting (IBL)
+// Support for true PBR Material textures (Albedo, Normal, Metallic, Roughness)
 //***************************************************************************************
 #include "Common/d3dApp.h"
 #include "Common/MathHelper.h"
@@ -39,7 +40,7 @@ struct MyTexture
 struct RenderItem
 {
     std::string SubmeshName;
-    int         TexSrvIndex;
+    int         TexSrvIndex; 
     int         NormalSrvIndex = -1;
     int         DisplaceSrvIndex = -1;
     bool        IsStar = false;
@@ -95,6 +96,12 @@ private:
     void BuildDepthSRV();
     void ShootLightFromCamera();
 
+    void CreateDefaultTextures();
+    void Create1x1Texture(ComPtr<ID3D12Resource>& tex, ComPtr<ID3D12Resource>& upload, const BYTE* pixelData);
+
+    //таблица дескрипторов PBR-материала
+    void CreateMaterialTable(int heapOffset, ID3D12Resource* albedo, ID3D12Resource* normal, ID3D12Resource* metallic, ID3D12Resource* roughness);
+
     void ComputeCascades(
         const DirectX::XMVECTOR& lightDir,
         const DirectX::XMMATRIX& viewMat,
@@ -121,18 +128,25 @@ private:
     static const UINT mShadowSrvOffset = GBuffer::NumRTs + 1;
     static const UINT mOffscreenSrvOffset = GBuffer::NumRTs + 2;
 
-    // Новые индексы дескрипторов для IBL
     static const UINT mIrradianceSrvOffset = GBuffer::NumRTs + 3;
     static const UINT mPrefilterSrvOffset = GBuffer::NumRTs + 4;
     static const UINT mBrdfLutSrvOffset = GBuffer::NumRTs + 5;
 
-    // Ресурсы IBL текстур
     ComPtr<ID3D12Resource> mIrradianceMapTex = nullptr;
     ComPtr<ID3D12Resource> mIrradianceMapUploadHeap = nullptr;
     ComPtr<ID3D12Resource> mPrefilterMapTex = nullptr;
     ComPtr<ID3D12Resource> mPrefilterMapUploadHeap = nullptr;
     ComPtr<ID3D12Resource> mBrdfLutTex = nullptr;
     ComPtr<ID3D12Resource> mBrdfLutUploadHeap = nullptr;
+
+    ComPtr<ID3D12Resource> mDefaultAlbedoTex = nullptr;
+    ComPtr<ID3D12Resource> mDefaultAlbedoUpload = nullptr;
+    ComPtr<ID3D12Resource> mDefaultNormalTex = nullptr;
+    ComPtr<ID3D12Resource> mDefaultNormalUpload = nullptr;
+    ComPtr<ID3D12Resource> mDefaultMetallicTex = nullptr;
+    ComPtr<ID3D12Resource> mDefaultMetallicUpload = nullptr;
+    ComPtr<ID3D12Resource> mDefaultRoughnessTex = nullptr;
+    ComPtr<ID3D12Resource> mDefaultRoughnessUpload = nullptr;
 
     std::vector<std::unique_ptr<MyTexture>> mAllTextures;
     std::unique_ptr<MeshGeometry>           mModelGeo = nullptr;
@@ -235,8 +249,11 @@ bool BoxApp::Initialize()
 {
     if (!D3DApp::Initialize()) return false;
     ThrowIfFailed(mCommandList->Reset(mDirectCmdListAlloc.Get(), nullptr));
+
+    CreateDefaultTextures();
     BuildDescriptorHeaps();
     BuildModelGeometry();
+
     ThrowIfFailed(mCommandList->Close());
     ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
     mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
@@ -244,6 +261,65 @@ bool BoxApp::Initialize()
     BuildDepthSRV();
     BuildInstancedItems();
     return true;
+}
+
+void BoxApp::Create1x1Texture(ComPtr<ID3D12Resource>& tex, ComPtr<ID3D12Resource>& upload, const BYTE* pixelData)
+{
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = 1;
+    texDesc.Height = 1;
+    texDesc.DepthOrArraySize = 1;
+    texDesc.MipLevels = 1;
+    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    texDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(
+        &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+        D3D12_HEAP_FLAG_NONE,
+        &texDesc,
+        D3D12_RESOURCE_STATE_COMMON,
+        nullptr,
+        IID_PPV_ARGS(&tex)));
+
+    const UINT64 uploadBufferSize = GetRequiredIntermediateSize(tex.Get(), 0, 1);
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(
+        &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+        D3D12_HEAP_FLAG_NONE,
+        &CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize),
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&upload)));
+
+    D3D12_SUBRESOURCE_DATA subresourceData = {};
+    subresourceData.pData = pixelData;
+    subresourceData.RowPitch = 4;
+    subresourceData.SlicePitch = 4;
+
+    UpdateSubresources(mCommandList.Get(), tex.Get(), upload.Get(), 0, 0, 1, &subresourceData);
+    mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(tex.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+}
+
+void BoxApp::CreateDefaultTextures()
+{
+    // Белая диффузная заглушка
+    BYTE white[] = { 255, 255, 255, 255 };
+    Create1x1Texture(mDefaultAlbedoTex, mDefaultAlbedoUpload, white);
+
+    // Плоская нормаль (вектор 0, 0, 1)
+    BYTE flatNormal[] = { 128, 128, 255, 255 };
+    Create1x1Texture(mDefaultNormalTex, mDefaultNormalUpload, flatNormal);
+
+    // Диэлектрик (черный металлик)
+    BYTE black[] = { 0, 0, 0, 255 };
+    Create1x1Texture(mDefaultMetallicTex, mDefaultMetallicUpload, black);
+
+    // Шероховатость по умолчанию (0.5)
+    BYTE grey[] = { 128, 128, 128, 255 };
+    Create1x1Texture(mDefaultRoughnessTex, mDefaultRoughnessUpload, grey);
 }
 
 void BoxApp::BuildDepthSRV()
@@ -324,8 +400,45 @@ void BoxApp::LoadTextures()
     addTexDDS(L"models/source/convertio.in_normal.dds", "tess_normal");
     addTexDDS(L"models/source/convertio.in_displacement.dds", "tess_displacement");
 
+    addTexDDS(L"models/source/Cerberus_A.dds", "cerberus_diffuse");
+    addTexDDS(L"models/source/Cerberus_N.dds", "cerberus_normal");
+    addTexDDS(L"models/source/Cerberus_M.dds", "cerberus_metallic");
+    addTexDDS(L"models/source/Cerberus_R.dds", "cerberus_roughness");
+
+    addTexDDS(L"models/source/Aset_wood_root_M_rkswd_2K_Albedo.dds", "wood_diffuse");
+    addTexDDS(L"models/source/Aset_wood_root_M_rkswd_2K_Normal_LOD0.dds", "wood_normal");
+    addTexDDS(L"models/source/Aset_wood_root_M_rkswd_2K_Roughness.dds", "wood_roughness");
+
     addTexDDS(L"models/source/CC556105.dds", "human_sprite");
     addTexDDS(L"models/source/butterfly.dds", "platform_diffuse");
+}
+
+void BoxApp::CreateMaterialTable(int heapOffset, ID3D12Resource* albedo, ID3D12Resource* normal, ID3D12Resource* metallic, ID3D12Resource* roughness)
+{
+    UINT srvSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    ID3D12Resource* resources[4] = {
+        albedo ? albedo : mDefaultAlbedoTex.Get(),
+        normal ? normal : mDefaultNormalTex.Get(),
+        metallic ? metallic : mDefaultMetallicTex.Get(),
+        roughness ? roughness : mDefaultRoughnessTex.Get()
+    };
+
+    for (int i = 0; i < 4; ++i)
+    {
+        CD3DX12_CPU_DESCRIPTOR_HANDLE hCpu(mObjectSrvHeap->GetCPUDescriptorHandleForHeapStart());
+        hCpu.Offset(heapOffset + i, srvSize);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format = resources[i]->GetDesc().Format;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MostDetailedMip = 0;
+        srvDesc.Texture2D.MipLevels = resources[i]->GetDesc().MipLevels;
+        srvDesc.Texture2D.PlaneSlice = 0;
+
+        md3dDevice->CreateShaderResourceView(resources[i], &srvDesc, hCpu);
+    }
 }
 
 void BoxApp::BuildDescriptorHeaps()
@@ -333,14 +446,13 @@ void BoxApp::BuildDescriptorHeaps()
     LoadTextures();
 
     D3D12_DESCRIPTOR_HEAP_DESC rtvDesc = {};
-    rtvDesc.NumDescriptors = GBuffer::NumRTs + 1; // 3 Gbuffer RTs + 1 Offscreen HDR RT
+    rtvDesc.NumDescriptors = GBuffer::NumRTs + 1;
     rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     rtvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&mGbufferRtvHeap)));
 
-    // Увеличиваем размер кучи, чтобы разместить GBuffer, глубину, CSM, Offscreen и 3 текстуры IBL
     D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
-    srvDesc.NumDescriptors = GBuffer::NumRTs + 6; // 3 GBuffer + depth (1) + CSM (1) + Offscreen (1) + 3 IBL
+    srvDesc.NumDescriptors = GBuffer::NumRTs + 6;
     srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&mSrvHeap)));
@@ -352,7 +464,7 @@ void BoxApp::BuildDescriptorHeaps()
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&mDsvHeap)));
 
     D3D12_DESCRIPTOR_HEAP_DESC objSrvDesc = {};
-    objSrvDesc.NumDescriptors = 128;
+    objSrvDesc.NumDescriptors = 512;
     objSrvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     objSrvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&objSrvDesc, IID_PPV_ARGS(&mObjectSrvHeap)));
@@ -366,7 +478,7 @@ void BoxApp::BuildDescriptorHeaps()
 
     mShadowMap.Init(md3dDevice.Get(), 2048, 2048, mDsvHeap.Get(), 0, mSrvHeap.Get(), mShadowSrvOffset);
 
-    // Загрузка предрассчитанных текстур для IBL
+    // Настройка IBL
     ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(
         md3dDevice.Get(), mCommandList.Get(),
         L"IrradianceMap_BC6U.dds", mIrradianceMapTex, mIrradianceMapUploadHeap));
@@ -381,8 +493,6 @@ void BoxApp::BuildDescriptorHeaps()
 
     UINT srvSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-    // Создаем SRV для IBL-текстур
-    // 1. Irradiance Map
     {
         CD3DX12_CPU_DESCRIPTOR_HANDLE hCpu(mSrvHeap->GetCPUDescriptorHandleForHeapStart());
         hCpu.Offset(mIrradianceSrvOffset, srvSize);
@@ -392,10 +502,8 @@ void BoxApp::BuildDescriptorHeaps()
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
         srvDesc.TextureCube.MostDetailedMip = 0;
         srvDesc.TextureCube.MipLevels = mIrradianceMapTex->GetDesc().MipLevels;
-        //srvDesc.TextureCube.ResourceMinLODPixels = 0.0f;
         md3dDevice->CreateShaderResourceView(mIrradianceMapTex.Get(), &srvDesc, hCpu);
     }
-    // 2. Prefiltered Map
     {
         CD3DX12_CPU_DESCRIPTOR_HANDLE hCpu(mSrvHeap->GetCPUDescriptorHandleForHeapStart());
         hCpu.Offset(mPrefilterSrvOffset, srvSize);
@@ -405,10 +513,8 @@ void BoxApp::BuildDescriptorHeaps()
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
         srvDesc.TextureCube.MostDetailedMip = 0;
         srvDesc.TextureCube.MipLevels = mPrefilterMapTex->GetDesc().MipLevels;
-       // srvDesc.TextureCube.ResourceMinLODPixels = 0.0f;
         md3dDevice->CreateShaderResourceView(mPrefilterMapTex.Get(), &srvDesc, hCpu);
     }
-    // 3. BRDF Integration LUT Map
     {
         CD3DX12_CPU_DESCRIPTOR_HANDLE hCpu(mSrvHeap->GetCPUDescriptorHandleForHeapStart());
         hCpu.Offset(mBrdfLutSrvOffset, srvSize);
@@ -419,24 +525,52 @@ void BoxApp::BuildDescriptorHeaps()
         srvDesc.Texture2D.MostDetailedMip = 0;
         srvDesc.Texture2D.MipLevels = mBrdfLutTex->GetDesc().MipLevels;
         srvDesc.Texture2D.PlaneSlice = 0;
-       // srvDesc.Texture2D.ResourceMinLODPixels = 0.0f;
         md3dDevice->CreateShaderResourceView(mBrdfLutTex.Get(), &srvDesc, hCpu);
     }
 
-    CD3DX12_CPU_DESCRIPTOR_HANDLE hDesc(mObjectSrvHeap->GetCPUDescriptorHandleForHeapStart());
     for (int i = 0; i < (int)mAllTextures.size(); ++i)
     {
         auto& tex = mAllTextures[i];
         if (tex->Name == "tess_diffuse")
-            mTessObjBaseSrvIndex = i;
+            mTessObjBaseSrvIndex = i * 4;
 
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvD = {};
-        srvD.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvD.Format = tex->Resource->GetDesc().Format;
-        srvD.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        srvD.Texture2D.MipLevels = tex->Resource->GetDesc().MipLevels;
-        md3dDevice->CreateShaderResourceView(tex->Resource.Get(), &srvD, hDesc);
-        hDesc.Offset(1, srvSize);
+        ID3D12Resource* albedo = tex->Resource.Get();
+        ID3D12Resource* normal = mDefaultNormalTex.Get();
+        ID3D12Resource* metallic = mDefaultMetallicTex.Get();
+        ID3D12Resource* roughness = mDefaultRoughnessTex.Get();
+
+        if (tex->Name == "star_diffuse")
+        {
+            for (auto& t : mAllTextures)
+            {
+                if (t->Name == "star_metallic") metallic = t->Resource.Get();
+                if (t->Name == "star_roughness") roughness = t->Resource.Get();
+            }
+        }
+        else if (tex->Name == "cerberus_diffuse")
+        {
+            for (auto& t : mAllTextures)
+            {
+                if (t->Name == "cerberus_normal") normal = t->Resource.Get();
+                if (t->Name == "cerberus_metallic") metallic = t->Resource.Get();
+                if (t->Name == "cerberus_roughness") roughness = t->Resource.Get();
+            }
+        }
+        else if (tex->Name == "wood_diffuse")
+        {
+            for (auto& t : mAllTextures)
+            {
+                if (t->Name == "wood_normal") normal = t->Resource.Get();
+                if (t->Name == "wood_roughness") roughness = t->Resource.Get();
+            }
+        }
+        else if (tex->Name == "tess_diffuse")
+        {
+            for (auto& t : mAllTextures)
+                if (t->Name == "tess_normal") normal = t->Resource.Get();
+        }
+
+        CreateMaterialTable(i * 4, albedo, normal, metallic, roughness);
     }
 }
 
@@ -571,7 +705,7 @@ void BoxApp::BuildModelGeometry()
 
         RenderItem ri;
         ri.SubmeshName = shape.name;
-        ri.TexSrvIndex = texIndex;
+        ri.TexSrvIndex = texIndex * 4;
         ri.IsStar = false;
         ri.UseTess = false;
         ri.CastShadow = false;
@@ -628,7 +762,7 @@ void BoxApp::BuildModelGeometry()
 
         RenderItem ri;
         ri.SubmeshName = "star";
-        ri.TexSrvIndex = texIndex;
+        ri.TexSrvIndex = texIndex * 4;
         ri.IsStar = true;
         ri.UseTess = false;
         ri.CastShadow = false;
@@ -728,7 +862,7 @@ void BoxApp::BuildModelGeometry()
             ri.NormalSrvIndex = mTessObjBaseSrvIndex + 1;
             ri.DisplaceSrvIndex = mTessObjBaseSrvIndex + 2;
             ri.IsStar = false;
-            ri.CastShadow = true;
+            ri.CastShadow = false;
             mRenderItems.push_back(ri);
         }
         else
@@ -778,7 +912,7 @@ void BoxApp::BuildModelGeometry()
         for (const auto& gv : grid.Vertices)
         {
             Vertex v = {};
-            v.Pos = gv.Position;
+            v.Pos = { gv.Position.x - 90.0f, - 50.0f, gv.Position.z };
             v.Normal = gv.Normal;
             v.TexC = gv.TexC;
             v.Tangent = gv.TangentU;
@@ -865,7 +999,7 @@ void BoxApp::BuildModelGeometry()
 
         RenderItem platformRi;
         platformRi.SubmeshName = "texturedPlatform";
-        platformRi.TexSrvIndex = platformTexIndex;
+        platformRi.TexSrvIndex = platformTexIndex * 4;
         platformRi.IsStar = false;
         platformRi.UseTess = false;
         platformRi.CastShadow = true;
@@ -873,6 +1007,223 @@ void BoxApp::BuildModelGeometry()
         XMMATRIX w = XMMatrixTranslation(0.0f, 0.2f, -25.0f);
         XMStoreFloat4x4(&platformRi.World, w);
         mRenderItems.push_back(platformRi);
+    }
+
+    // Револьвер
+
+    {
+        tinyobj::ObjReader reader4;
+        tinyobj::ObjReaderConfig config4;
+        config4.triangulate = true;
+        if (reader4.ParseFromFile("models/source/Cerberus_LP.obj", config4) && !reader4.GetShapes().empty())
+        {
+            auto& attrib4 = reader4.GetAttrib();
+            auto& shapes4 = reader4.GetShapes();
+
+            UINT indexOffset = (UINT)allIndices.size();
+            UINT indexCount = 0;
+
+            for (const auto& shape : shapes4)
+            {
+                const auto& mi = shape.mesh.indices;
+                size_t tris = mi.size() / 3;
+                for (size_t tri = 0; tri < tris; ++tri)
+                {
+                    const auto& j0 = mi[tri * 3 + 0];
+                    const auto& j1 = mi[tri * 3 + 1];
+                    const auto& j2 = mi[tri * 3 + 2];
+
+                    XMFLOAT3 p0 = { attrib4.vertices[3 * j0.vertex_index + 0],
+                                    attrib4.vertices[3 * j0.vertex_index + 1],
+                                    attrib4.vertices[3 * j0.vertex_index + 2] };
+                    XMFLOAT3 p1 = { attrib4.vertices[3 * j1.vertex_index + 0],
+                                    attrib4.vertices[3 * j1.vertex_index + 1],
+                                    attrib4.vertices[3 * j1.vertex_index + 2] };
+                    XMFLOAT3 p2 = { attrib4.vertices[3 * j2.vertex_index + 0],
+                                    attrib4.vertices[3 * j2.vertex_index + 1],
+                                    attrib4.vertices[3 * j2.vertex_index + 2] };
+
+                    XMFLOAT2 u0 = (j0.texcoord_index >= 0) ?
+                        XMFLOAT2{ attrib4.texcoords[2 * j0.texcoord_index + 0],
+                                 1.0f - attrib4.texcoords[2 * j0.texcoord_index + 1] } : XMFLOAT2{ 0,0 };
+                    XMFLOAT2 u1 = (j1.texcoord_index >= 0) ?
+                        XMFLOAT2{ attrib4.texcoords[2 * j1.texcoord_index + 0],
+                                 1.0f - attrib4.texcoords[2 * j1.texcoord_index + 1] } : XMFLOAT2{ 0,0 };
+                    XMFLOAT2 u2 = (j2.texcoord_index >= 0) ?
+                        XMFLOAT2{ attrib4.texcoords[2 * j2.texcoord_index + 0],
+                                 1.0f - attrib4.texcoords[2 * j2.texcoord_index + 1] } : XMFLOAT2{ 0,0 };
+
+                    XMFLOAT3 e1 = { p1.x - p0.x, p1.y - p0.y, p1.z - p0.z };
+                    XMFLOAT3 e2 = { p2.x - p0.x, p2.y - p0.y, p2.z - p0.z };
+                    XMFLOAT2 d1 = { u1.x - u0.x, u1.y - u0.y };
+                    XMFLOAT2 d2 = { u2.x - u0.x, u2.y - u0.y };
+                    float det = d1.x * d2.y - d2.x * d1.y;
+                    float ff = (fabsf(det) > 1e-8f) ? (1.0f / det) : 0.0f;
+                    XMFLOAT3 tang;
+                    tang.x = ff * (d2.y * e1.x - d1.y * e2.x);
+                    tang.y = ff * (d2.y * e1.y - d1.y * e2.y);
+                    tang.z = ff * (d2.y * e1.z - d1.y * e2.z);
+                    XMVECTOR TT = XMLoadFloat3(&tang);
+                    if (XMVectorGetX(XMVector3Length(TT)) > 1e-6f)
+                        XMStoreFloat3(&tang, XMVector3Normalize(TT));
+                    else tang = { 1,0,0 };
+
+                    auto mv = [&](const tinyobj::index_t& idx,
+                        const XMFLOAT3& pp, const XMFLOAT2& uu) -> Vertex
+                        {
+                            Vertex vv = {};
+                            vv.Pos = pp;
+                            vv.Normal = (idx.normal_index >= 0) ?
+                                XMFLOAT3{ attrib4.normals[3 * idx.normal_index + 0],
+                                         attrib4.normals[3 * idx.normal_index + 1],
+                                         attrib4.normals[3 * idx.normal_index + 2] } :
+                                XMFLOAT3{ 0,1,0 };
+                            vv.TexC = uu;
+                            vv.Tangent = tang;
+                            return vv;
+                        };
+                    allVertices.push_back(mv(j0, p0, u0)); allIndices.push_back((UINT)(allVertices.size() - 1));
+                    allVertices.push_back(mv(j1, p1, u1)); allIndices.push_back((UINT)(allVertices.size() - 1));
+                    allVertices.push_back(mv(j2, p2, u2)); allIndices.push_back((UINT)(allVertices.size() - 1));
+                    indexCount += 3;
+                }
+            }
+
+            SubmeshGeometry submesh;
+            submesh.IndexCount = indexCount;
+            submesh.StartIndexLocation = indexOffset;
+            submesh.BaseVertexLocation = 0;
+            mModelGeo->DrawArgs["cerberusMesh"] = submesh;
+
+            int cerberusTexIndex = 0;
+            for (int i = 0; i < (int)mAllTextures.size(); ++i) {
+                if (mAllTextures[i]->Name == "cerberus_diffuse") {
+                    cerberusTexIndex = i;
+                    break;
+                }
+            }
+
+            RenderItem ri;
+            ri.SubmeshName = "cerberusMesh";
+            ri.TexSrvIndex = cerberusTexIndex * 4;
+            ri.IsStar = false;
+            ri.UseTess = false;
+            ri.CastShadow = false;
+
+            XMMATRIX w = XMMatrixScaling(0.5f, 0.5f, 0.5f) * XMMatrixTranslation(-15.0f, 30.0f, -80.0f);
+            XMStoreFloat4x4(&ri.World, w);
+
+            mRenderItems.push_back(ri);
+        }
+    }
+
+    //Деревянный корень
+
+    {
+        tinyobj::ObjReader reader5;
+        tinyobj::ObjReaderConfig config5;
+        config5.triangulate = true;
+        if (reader5.ParseFromFile("models/source/Aset_wood_root_M_rkswd_LOD0.obj", config5) && !reader5.GetShapes().empty())
+        {
+            auto& attrib5 = reader5.GetAttrib();
+            auto& shapes5 = reader5.GetShapes();
+
+            UINT indexOffset = (UINT)allIndices.size();
+            UINT indexCount = 0;
+
+            for (const auto& shape : shapes5)
+            {
+                const auto& mi = shape.mesh.indices;
+                size_t tris = mi.size() / 3;
+                for (size_t tri = 0; tri < tris; ++tri)
+                {
+                    const auto& j0 = mi[tri * 3 + 0];
+                    const auto& j1 = mi[tri * 3 + 1];
+                    const auto& j2 = mi[tri * 3 + 2];
+
+                    XMFLOAT3 p0 = { attrib5.vertices[3 * j0.vertex_index + 0],
+                                    attrib5.vertices[3 * j0.vertex_index + 1],
+                                    attrib5.vertices[3 * j0.vertex_index + 2] };
+                    XMFLOAT3 p1 = { attrib5.vertices[3 * j1.vertex_index + 0],
+                                    attrib5.vertices[3 * j1.vertex_index + 1],
+                                    attrib5.vertices[3 * j1.vertex_index + 2] };
+                    XMFLOAT3 p2 = { attrib5.vertices[3 * j2.vertex_index + 0],
+                                    attrib5.vertices[3 * j2.vertex_index + 1],
+                                    attrib5.vertices[3 * j2.vertex_index + 2] };
+
+                    XMFLOAT2 u0 = (j0.texcoord_index >= 0) ?
+                        XMFLOAT2{ attrib5.texcoords[2 * j0.texcoord_index + 0],
+                                 1.0f - attrib5.texcoords[2 * j0.texcoord_index + 1] } : XMFLOAT2{ 0,0 };
+                    XMFLOAT2 u1 = (j1.texcoord_index >= 0) ?
+                        XMFLOAT2{ attrib5.texcoords[2 * j1.texcoord_index + 0],
+                                 1.0f - attrib5.texcoords[2 * j1.texcoord_index + 1] } : XMFLOAT2{ 0,0 };
+                    XMFLOAT2 u2 = (j2.texcoord_index >= 0) ?
+                        XMFLOAT2{ attrib5.texcoords[2 * j2.texcoord_index + 0],
+                                 1.0f - attrib5.texcoords[2 * j2.texcoord_index + 1] } : XMFLOAT2{ 0,0 };
+
+                    XMFLOAT3 e1 = { p1.x - p0.x, p1.y - p0.y, p1.z - p0.z };
+                    XMFLOAT3 e2 = { p2.x - p0.x, p2.y - p0.y, p2.z - p0.z };
+                    XMFLOAT2 d1 = { u1.x - u0.x, u1.y - u0.y };
+                    XMFLOAT2 d2 = { u2.x - u0.x, u2.y - u0.y };
+                    float det = d1.x * d2.y - d2.x * d1.y;
+                    float ff = (fabsf(det) > 1e-8f) ? (1.0f / det) : 0.0f;
+                    XMFLOAT3 tang;
+                    tang.x = ff * (d2.y * e1.x - d1.y * e2.x);
+                    tang.y = ff * (d2.y * e1.y - d1.y * e2.y);
+                    tang.z = ff * (d2.y * e1.z - d1.y * e2.z);
+                    XMVECTOR TT = XMLoadFloat3(&tang);
+                    if (XMVectorGetX(XMVector3Length(TT)) > 1e-6f)
+                        XMStoreFloat3(&tang, XMVector3Normalize(TT));
+                    else tang = { 1,0,0 };
+
+                    auto mv = [&](const tinyobj::index_t& idx,
+                        const XMFLOAT3& pp, const XMFLOAT2& uu) -> Vertex
+                        {
+                            Vertex vv = {};
+                            vv.Pos = pp;
+                            vv.Normal = (idx.normal_index >= 0) ?
+                                XMFLOAT3{ attrib5.normals[3 * idx.normal_index + 0],
+                                         attrib5.normals[3 * idx.normal_index + 1],
+                                         attrib5.normals[3 * idx.normal_index + 2] } :
+                                XMFLOAT3{ 0,1,0 };
+                            vv.TexC = uu;
+                            vv.Tangent = tang;
+                            return vv;
+                        };
+                    allVertices.push_back(mv(j0, p0, u0)); allIndices.push_back((UINT)(allVertices.size() - 1));
+                    allVertices.push_back(mv(j1, p1, u1)); allIndices.push_back((UINT)(allVertices.size() - 1));
+                    allVertices.push_back(mv(j2, p2, u2)); allIndices.push_back((UINT)(allVertices.size() - 1));
+                    indexCount += 3;
+                }
+            }
+
+            SubmeshGeometry submesh;
+            submesh.IndexCount = indexCount;
+            submesh.StartIndexLocation = indexOffset;
+            submesh.BaseVertexLocation = 0;
+            mModelGeo->DrawArgs["woodRootMesh"] = submesh;
+
+            int woodTexIndex = 0;
+            for (int i = 0; i < (int)mAllTextures.size(); ++i) {
+                if (mAllTextures[i]->Name == "wood_diffuse") {
+                    woodTexIndex = i;
+                    break;
+                }
+            }
+
+            RenderItem ri;
+            ri.SubmeshName = "woodRootMesh";
+            ri.TexSrvIndex = woodTexIndex * 4;
+            ri.IsStar = false;
+            ri.UseTess = false;
+            ri.CastShadow = false;
+
+            // Значительно уменьшаем масштаб (0.3f) и сдвигаем в противоположный правый дальний край (X = 15, Z = 40) на высоту Y = 12
+            XMMATRIX w = XMMatrixScaling(0.5f, 0.5f, 0.5f) * XMMatrixTranslation(150.0f, 12.0f, 60.0f);
+            XMStoreFloat4x4(&ri.World, w);
+
+            mRenderItems.push_back(ri);
+        }
     }
 
     const UINT vbSize = (UINT)allVertices.size() * sizeof(Vertex);
@@ -1224,7 +1575,6 @@ void BoxApp::Draw(const GameTimer& gt)
         mCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
     }
 
-    XMMATRIX world = XMLoadFloat4x4(&mWorld);
     XMMATRIX view = XMLoadFloat4x4(&mView);
     XMMATRIX proj = XMLoadFloat4x4(&mProj);
 
@@ -1236,19 +1586,22 @@ void BoxApp::Draw(const GameTimer& gt)
 
     UINT geomCbIndex = 0;
 
-    // Sponza
+    // Спонза и независимые 3D модели (Револьвер, Ручка, Платформа)
     {
-        GeometryPassConstants geomConsts;
-        XMStoreFloat4x4(&geomConsts.WorldViewProj, XMMatrixTranspose(world * view * proj));
-        XMStoreFloat4x4(&geomConsts.World, XMMatrixTranspose(world));
-        XMStoreFloat4x4(&geomConsts.WorldInvTranspose, XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, world))));
-        geomConsts.Time = 0.0f;
-
-        mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), geomConsts, geomCbIndex++);
-
         for (const auto& ri : mRenderItems)
         {
             if (ri.IsStar || ri.UseTess) continue;
+
+            XMMATRIX itemWorld = XMLoadFloat4x4(&ri.World);
+
+            GeometryPassConstants geomConsts;
+            XMStoreFloat4x4(&geomConsts.WorldViewProj, XMMatrixTranspose(itemWorld * view * proj));
+            XMStoreFloat4x4(&geomConsts.World, XMMatrixTranspose(itemWorld));
+            // Возвращен оригинальный расчет WorldInvTranspose
+            XMStoreFloat4x4(&geomConsts.WorldInvTranspose, XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, itemWorld))));
+            geomConsts.Time = 0.0f;
+
+            mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), geomConsts, geomCbIndex++);
 
             CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(mObjectSrvHeap->GetGPUDescriptorHandleForHeapStart());
             texHandle.Offset(ri.TexSrvIndex, srvSize);
@@ -1272,7 +1625,6 @@ void BoxApp::Draw(const GameTimer& gt)
         XMStoreFloat4x4(&shotConsts.World, XMMatrixTranspose(shotWorld));
         XMStoreFloat4x4(&shotConsts.WorldInvTranspose, XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, shotWorld))));
         shotConsts.Time = gt.TotalTime();
-        shotConsts.pad.y = 1.0f; // Передаем флаг для активации PBR-характеристик золотого металла
 
         mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), shotConsts, geomCbIndex++);
 
@@ -1297,7 +1649,7 @@ void BoxApp::Draw(const GameTimer& gt)
 
         XMStoreFloat4x4(&gc.WorldViewProj, XMMatrixTranspose(worldMat * view * proj));
         XMStoreFloat4x4(&gc.World, XMMatrixTranspose(worldMat));
-        XMStoreFloat4x4(&gc.WorldInvTranspose, MathHelper::InverseTranspose(worldMat));
+        XMStoreFloat4x4(&gc.WorldInvTranspose, XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, worldMat))));
         gc.pad.x = 2.0f;
 
         mRenderingSystem.SetGeometryPassConstants(mCommandList.Get(), gc, geomCbIndex++);
@@ -1333,13 +1685,13 @@ void BoxApp::Draw(const GameTimer& gt)
         {
             const float ts = mTessWorldScale;
             finalWorld = XMMatrixScaling(ts, ts, ts) *
-                XMMatrixTranslation(mTessWorldOffset.x, mTessWorldOffset.y, mTessWorldOffset.z) *
-                world;
+                XMMatrixTranslation(mTessWorldOffset.x, mTessWorldOffset.y, mTessWorldOffset.z);
             gc.pad.x = 0.0f;
         }
 
         XMStoreFloat4x4(&gc.WorldViewProj, XMMatrixTranspose(finalWorld * view * proj));
         XMStoreFloat4x4(&gc.World, XMMatrixTranspose(finalWorld));
+        // Возвращен оригинальный расчет WorldInvTranspose для тесселированных объектов
         XMStoreFloat4x4(&gc.WorldInvTranspose, XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, finalWorld))));
         gc.Time = gt.TotalTime();
 
@@ -1368,7 +1720,7 @@ void BoxApp::Draw(const GameTimer& gt)
     mRenderingSystem.EndGeometryPass(mCommandList.Get());
 
     // ---------------------------------------------------------------------------
-    //  Lighting Pass (Запись во вспомогательный буфер с расчетом PBR + IBL)
+    //  Lighting Pass 
     // ---------------------------------------------------------------------------
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         mDepthStencilBuffer.Get(),
@@ -1412,7 +1764,6 @@ void BoxApp::Draw(const GameTimer& gt)
         --shotBudget;
     }
 
-    // Получаем GPU-дескриптор начала IBL текстур (они расположены последовательно в куче SRV)
     CD3DX12_GPU_DESCRIPTOR_HANDLE iblSrvHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
     iblSrvHandle.Offset(mIrradianceSrvOffset, srvSize);
 
@@ -1526,7 +1877,7 @@ void BoxApp::BuildInstancedItems() {
             for (int z = 0; z < nZ; ++z) {
                 RenderItem ri;
                 ri.SubmeshName = "billboard";
-                ri.TexSrvIndex = billboardTexIndex;
+                ri.TexSrvIndex = billboardTexIndex * 4;
                 ri.UseTess = false;
                 ri.CastShadow = true;
 

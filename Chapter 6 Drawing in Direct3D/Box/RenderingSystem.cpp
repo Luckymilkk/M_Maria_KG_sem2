@@ -278,7 +278,7 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
 {
     {
         CD3DX12_DESCRIPTOR_RANGE texTable;
-        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0); // Резервируем t0, t1, t2, t3 для конвейера геометрии
 
         CD3DX12_ROOT_PARAMETER params[2];
         params[0].InitAsConstantBufferView(0);
