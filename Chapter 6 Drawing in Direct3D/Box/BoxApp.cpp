@@ -40,7 +40,7 @@ struct MyTexture
 struct RenderItem
 {
     std::string SubmeshName;
-    int         TexSrvIndex; 
+    int         TexSrvIndex;
     int         NormalSrvIndex = -1;
     int         DisplaceSrvIndex = -1;
     bool        IsStar = false;
@@ -215,6 +215,7 @@ private:
     bool mEnableThermal = false;
     bool mEnableChromatic = false;
     bool mEnableLensFlare = false;
+    bool mUseBeckmann = false; 
 
     void BuildInstancedItems();
     void BuildOctree(OctreeNode* node, int depth);
@@ -305,19 +306,15 @@ void BoxApp::Create1x1Texture(ComPtr<ID3D12Resource>& tex, ComPtr<ID3D12Resource
 
 void BoxApp::CreateDefaultTextures()
 {
-    // Белая диффузная заглушка
     BYTE white[] = { 255, 255, 255, 255 };
     Create1x1Texture(mDefaultAlbedoTex, mDefaultAlbedoUpload, white);
 
-    // Плоская нормаль (вектор 0, 0, 1)
     BYTE flatNormal[] = { 128, 128, 255, 255 };
     Create1x1Texture(mDefaultNormalTex, mDefaultNormalUpload, flatNormal);
 
-    // Диэлектрик (черный металлик)
     BYTE black[] = { 0, 0, 0, 255 };
     Create1x1Texture(mDefaultMetallicTex, mDefaultMetallicUpload, black);
 
-    // Шероховатость по умолчанию (0.5)
     BYTE grey[] = { 128, 128, 128, 255 };
     Create1x1Texture(mDefaultRoughnessTex, mDefaultRoughnessUpload, grey);
 }
@@ -478,7 +475,6 @@ void BoxApp::BuildDescriptorHeaps()
 
     mShadowMap.Init(md3dDevice.Get(), 2048, 2048, mDsvHeap.Get(), 0, mSrvHeap.Get(), mShadowSrvOffset);
 
-    // Настройка IBL
     ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(
         md3dDevice.Get(), mCommandList.Get(),
         L"IrradianceMap_BC6U.dds", mIrradianceMapTex, mIrradianceMapUploadHeap));
@@ -912,7 +908,7 @@ void BoxApp::BuildModelGeometry()
         for (const auto& gv : grid.Vertices)
         {
             Vertex v = {};
-            v.Pos = { gv.Position.x - 90.0f, - 50.0f, gv.Position.z };
+            v.Pos = { gv.Position.x - 90.0f, -50.0f, gv.Position.z };
             v.Normal = gv.Normal;
             v.TexC = gv.TexC;
             v.Tangent = gv.TangentU;
@@ -1009,13 +1005,11 @@ void BoxApp::BuildModelGeometry()
         mRenderItems.push_back(platformRi);
     }
 
-    // Револьвер
-
     {
         tinyobj::ObjReader reader4;
         tinyobj::ObjReaderConfig config4;
         config4.triangulate = true;
-        if (reader4.ParseFromFile("models/source/Cerberus_LP.obj", config4) && !reader4.GetShapes().empty())
+        if (reader4.ParseFromFile("models/source/Cerberus_LP_fbx.obj", config4) && !reader4.GetShapes().empty())
         {
             auto& attrib4 = reader4.GetAttrib();
             auto& shapes4 = reader4.GetShapes();
@@ -1117,8 +1111,6 @@ void BoxApp::BuildModelGeometry()
         }
     }
 
-    //Деревянный корень
-
     {
         tinyobj::ObjReader reader5;
         tinyobj::ObjReaderConfig config5;
@@ -1218,7 +1210,6 @@ void BoxApp::BuildModelGeometry()
             ri.UseTess = false;
             ri.CastShadow = false;
 
-            // Значительно уменьшаем масштаб (0.3f) и сдвигаем в противоположный правый дальний край (X = 15, Z = 40) на высоту Y = 12
             XMMATRIX w = XMMatrixScaling(0.5f, 0.5f, 0.5f) * XMMatrixTranslation(150.0f, 12.0f, 60.0f);
             XMStoreFloat4x4(&ri.World, w);
 
@@ -1328,6 +1319,7 @@ LRESULT BoxApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (wParam == '4') mEnableThermal = !mEnableThermal;
         if (wParam == '5') mEnableChromatic = !mEnableChromatic;
         if (wParam == '6') mEnableLensFlare = !mEnableLensFlare;
+        if (wParam == '7') mUseBeckmann = !mUseBeckmann; 
     }
     return D3DApp::MsgProc(hwnd, msg, wParam, lParam);
 }
@@ -1427,6 +1419,7 @@ void BoxApp::Update(const GameTimer& gt)
 
     std::wstring stats = L"Culling: " + modeName +
         L" | Visible: " + std::to_wstring(visibleCount) + L"/" + std::to_wstring(mInstancedItems.size()) +
+        L" | BRDF: " + (mUseBeckmann ? L"Beckmann" : L"GGX") +
         L" | FX: [4] Thermal: " + (mEnableThermal ? L"ON" : L"OFF") +
         L" [5] Chromatic: " + (mEnableChromatic ? L"ON" : L"OFF") +
         L" [6] LensFlare: " + (mEnableLensFlare ? L"ON" : L"OFF");
@@ -1480,9 +1473,6 @@ void BoxApp::Draw(const GameTimer& gt)
     ThrowIfFailed(mDirectCmdListAlloc->Reset());
     ThrowIfFailed(mCommandList->Reset(mDirectCmdListAlloc.Get(), nullptr));
 
-    // ---------------------------------------------------------------------------
-    //  CSM Shadow Pass
-    // ---------------------------------------------------------------------------
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         mShadowMap.Resource(),
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
@@ -1560,9 +1550,6 @@ void BoxApp::Draw(const GameTimer& gt)
         D3D12_RESOURCE_STATE_DEPTH_WRITE,
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
-    // ---------------------------------------------------------------------------
-    //  GBUFFER Geometry Pass
-    // ---------------------------------------------------------------------------
     mCommandList->RSSetViewports(1, &mScreenViewport);
     mCommandList->RSSetScissorRects(1, &mScissorRect);
     mCommandList->ClearDepthStencilView(
@@ -1586,7 +1573,6 @@ void BoxApp::Draw(const GameTimer& gt)
 
     UINT geomCbIndex = 0;
 
-    // Спонза и независимые 3D модели (Револьвер, Ручка, Платформа)
     {
         for (const auto& ri : mRenderItems)
         {
@@ -1597,7 +1583,6 @@ void BoxApp::Draw(const GameTimer& gt)
             GeometryPassConstants geomConsts;
             XMStoreFloat4x4(&geomConsts.WorldViewProj, XMMatrixTranspose(itemWorld * view * proj));
             XMStoreFloat4x4(&geomConsts.World, XMMatrixTranspose(itemWorld));
-            // Возвращен оригинальный расчет WorldInvTranspose
             XMStoreFloat4x4(&geomConsts.WorldInvTranspose, XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, itemWorld))));
             geomConsts.Time = 0.0f;
 
@@ -1612,7 +1597,6 @@ void BoxApp::Draw(const GameTimer& gt)
         }
     }
 
-    // Летающие звезды
     for (const auto& sl : mShotLights)
     {
         XMMATRIX shotWorld =
@@ -1639,7 +1623,6 @@ void BoxApp::Draw(const GameTimer& gt)
         }
     }
 
-    // Инстанцированные биллборды людей
     for (const auto& ri : mInstancedItems)
     {
         if (!ri.IsVisible) continue;
@@ -1662,9 +1645,6 @@ void BoxApp::Draw(const GameTimer& gt)
         mCommandList->DrawIndexedInstanced(sub.IndexCount, 1, sub.StartIndexLocation, sub.BaseVertexLocation, 0);
     }
 
-    // ---------------------------------------------------------------------------
-    //  Tessellation Pass
-    // ---------------------------------------------------------------------------
     mRenderingSystem.BeginTessellationPass(mCommandList.Get(), DepthStencilView());
 
     UINT tessCbSlot = 0;
@@ -1691,7 +1671,6 @@ void BoxApp::Draw(const GameTimer& gt)
 
         XMStoreFloat4x4(&gc.WorldViewProj, XMMatrixTranspose(finalWorld * view * proj));
         XMStoreFloat4x4(&gc.World, XMMatrixTranspose(finalWorld));
-        // Возвращен оригинальный расчет WorldInvTranspose для тесселированных объектов
         XMStoreFloat4x4(&gc.WorldInvTranspose, XMMatrixTranspose(XMMatrixTranspose(XMMatrixInverse(nullptr, finalWorld))));
         gc.Time = gt.TotalTime();
 
@@ -1719,9 +1698,6 @@ void BoxApp::Draw(const GameTimer& gt)
 
     mRenderingSystem.EndGeometryPass(mCommandList.Get());
 
-    // ---------------------------------------------------------------------------
-    //  Lighting Pass 
-    // ---------------------------------------------------------------------------
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         mDepthStencilBuffer.Get(),
         D3D12_RESOURCE_STATE_DEPTH_WRITE,
@@ -1770,11 +1746,9 @@ void BoxApp::Draw(const GameTimer& gt)
     mRenderingSystem.DoLightingPass(
         mCommandList.Get(), CurrentBackBufferView(), DepthStencilView(),
         mEyePosW, ivp, iv, ip, mDepthSrvGpuHandle,
-        mShadowMap.SRV(), iblSrvHandle, mLightViewProj, mCascadeSplitDepths);
+        mShadowMap.SRV(), iblSrvHandle, mLightViewProj, mCascadeSplitDepths,
+        mUseBeckmann); // Передаем флаг выбора BRDF
 
-    // ---------------------------------------------------------------------------
-    //  Post-Processing Pass 
-    // ---------------------------------------------------------------------------
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         CurrentBackBuffer(),
         D3D12_RESOURCE_STATE_PRESENT,

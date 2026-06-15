@@ -34,7 +34,7 @@ cbuffer cbLighting : register(b0)
 {
     LightData gLights[kMaxLights];
     int       gNumLights;
-    float     pad0;
+    int       gUseBeckmann; // 0 - GGX, 1 - Beckmann (заменил pad0)
     float     pad1;
     float     pad2;
     float3    gEyePosW;
@@ -86,6 +86,7 @@ float3 fresnelSchlickRoughness(float cosTheta, float3 F0, float roughness)
     return F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(clamp(1.0f - cosTheta, 0.0f, 1.0f), 5.0f);
 }
 
+// GGX NDF
 float DistributionGGX(float3 N, float3 H, float roughness)
 {
     float a = roughness * roughness;
@@ -95,6 +96,21 @@ float DistributionGGX(float3 N, float3 H, float roughness)
     float num = a2;
     float denom = (NdotH2 * (a2 - 1.0f) + 1.0f);
     denom = PI * denom * denom;
+    return num / max(denom, 0.0001f);
+}
+
+// Beckmann NDF
+float DistributionBeckmann(float3 N, float3 H, float roughness)
+{
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0f);
+    float NdotH2 = NdotH * NdotH;
+    if (NdotH2 < 1e-6f) return 0.0f;
+    
+    float tan2 = (1.0f - NdotH2) / NdotH2;
+    float num = exp(-tan2 / max(a2, 0.0001f));
+    float denom = PI * a2 * NdotH2 * NdotH2;
     return num / max(denom, 0.0001f);
 }
 
@@ -168,13 +184,12 @@ float4 PS(VertexOut pin) : SV_Target
     
     float4 specData  = gSpecular.Sample(gsamPoint, pin.TexC);
     float  metallic  = specData.r;
-    float  roughness = max(specData.g, 0.04f); // избегаем деления на ноль при нулевой шероховатости
+    float  roughness = max(specData.g, 0.04f);
     float  ao        = specData.b;
 
     float3 V = normalize(gEyePosW - posW);
     float3 R = reflect(-V, normal);
 
-    // Базовое отражение F0 (0.04 для диэлектриков, albedo для металлов)
     float3 F0 = float3(0.04f, 0.04f, 0.04f);
     F0 = lerp(F0, albedo.rgb, metallic);
 
@@ -216,7 +231,17 @@ float4 PS(VertexOut pin) : SV_Target
         float NdotL = max(dot(normal, L), 0.0f);
         float NdotV = max(dot(normal, V), 0.0f);
 
-        float D = DistributionGGX(normal, H, roughness);
+        // Переключатель NDF (Normal Distribution Function)
+        float D = 0.0f;
+        if (gUseBeckmann > 0)
+        {
+            D = DistributionBeckmann(normal, H, roughness);
+        }
+        else
+        {
+            D = DistributionGGX(normal, H, roughness);
+        }
+
         float G = GeometrySmith(normal, V, L, roughness);
         float3 F = fresnelSchlick(max(dot(H, V), 0.0f), F0);
 
@@ -240,13 +265,11 @@ float4 PS(VertexOut pin) : SV_Target
     float3 irradiance = gIrradianceMap.Sample(gsamLinear, normal).rgb;
     float3 diffuseIBL = irradiance * albedo.rgb;
 
-    // Отраженная часть IBL (Prefilter + BRDF Integration LUT)
     const float MAX_REFLECTION_LOD = 3.0f; 
     float3 prefilteredColor = gPrefilterMap.SampleLevel(gsamLinear, R, roughness * MAX_REFLECTION_LOD).rgb;
     float2 envBRDF  = gBRDF_LUT.Sample(gsamLinear, float2(max(dot(normal, V), 0.0f), roughness)).rg;
     float3 specularIBL = prefilteredColor * (F_ibl * envBRDF.x + envBRDF.y);
 
-    // Общее окружающее освещение с учетом самозатенения
     float3 ambient = (kD_ibl * diffuseIBL + specularIBL) * ao;
     totalLight += ambient;
 

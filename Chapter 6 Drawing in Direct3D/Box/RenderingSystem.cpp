@@ -196,9 +196,10 @@ void RenderingSystem::DoLightingPass(
     XMFLOAT4X4 invProj,
     D3D12_GPU_DESCRIPTOR_HANDLE depthSrvHandle,
     D3D12_GPU_DESCRIPTOR_HANDLE shadowSrvHandle,
-    D3D12_GPU_DESCRIPTOR_HANDLE iblSrvHandle, // IBL SRV
+    D3D12_GPU_DESCRIPTOR_HANDLE iblSrvHandle,
     const XMMATRIX* lightViewProjMats,
-    const float* splitDepths)
+    const float* splitDepths,
+    bool useBeckmann)
 {
     cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
         mOffscreenTex.Get(),
@@ -210,6 +211,7 @@ void RenderingSystem::DoLightingPass(
 
     LightingPassConstants lightConsts = {};
     lightConsts.NumLights = (int)mLights.size();
+    lightConsts.UseBeckmann = useBeckmann ? 1 : 0;
     lightConsts.EyePosW = eyePos;
     lightConsts.InvViewProj = invViewProj;
     lightConsts.InvView = invView;
@@ -232,7 +234,7 @@ void RenderingSystem::DoLightingPass(
     cmdList->SetGraphicsRootDescriptorTable(1, mGBuffer.GetSRVTable());
     cmdList->SetGraphicsRootDescriptorTable(2, depthSrvHandle);
     cmdList->SetGraphicsRootDescriptorTable(3, shadowSrvHandle);
-    cmdList->SetGraphicsRootDescriptorTable(4, iblSrvHandle); // Назначаем IBL текстуры
+    cmdList->SetGraphicsRootDescriptorTable(4, iblSrvHandle);
 
     cmdList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList->DrawInstanced(3, 1, 0, 0);
@@ -278,7 +280,7 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
 {
     {
         CD3DX12_DESCRIPTOR_RANGE texTable;
-        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0); // Резервируем t0, t1, t2, t3 для конвейера геометрии
+        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);
 
         CD3DX12_ROOT_PARAMETER params[2];
         params[0].InitAsConstantBufferView(0);
@@ -295,18 +297,17 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
     }
 
     {
-        // Сигнатура для фазы Lighting
         CD3DX12_DESCRIPTOR_RANGE gbufTable;
-        gbufTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::NumRTs, 0); // t0-t2
+        gbufTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::NumRTs, 0);
 
         CD3DX12_DESCRIPTOR_RANGE depthTable;
-        depthTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, GBuffer::NumRTs); // t3
+        depthTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, GBuffer::NumRTs);
 
         CD3DX12_DESCRIPTOR_RANGE shadowTable;
-        shadowTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, GBuffer::NumRTs + 1); // t4
+        shadowTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, GBuffer::NumRTs + 1);
 
         CD3DX12_DESCRIPTOR_RANGE iblTable;
-        iblTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, GBuffer::NumRTs + 2); // t5-t7 для IBL
+        iblTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, GBuffer::NumRTs + 2);
 
         CD3DX12_ROOT_PARAMETER params[5];
         params[0].InitAsConstantBufferView(0);
@@ -328,7 +329,7 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
             D3D12_COMPARISON_FUNC_LESS_EQUAL,
             D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE
         );
-        samplers[2] = CD3DX12_STATIC_SAMPLER_DESC(2, D3D12_FILTER_MIN_MAG_MIP_LINEAR); // Линейный сэмплер для IBL
+        samplers[2] = CD3DX12_STATIC_SAMPLER_DESC(2, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
 
         CD3DX12_ROOT_SIGNATURE_DESC desc(5, params, 3, samplers,
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);

@@ -54,7 +54,7 @@ struct LightingPassConstants
 {
     LightData           Lights[kMaxLights];
     int                 NumLights;
-    float               pad0;
+    int                 UseBeckmann; // 0 - GGX, 1 - Beckmann (заменил pad0)
     float               pad1;
     float               pad2;
     DirectX::XMFLOAT3   EyePosW;
@@ -145,9 +145,10 @@ public:
         DirectX::XMFLOAT4X4 invProj,
         D3D12_GPU_DESCRIPTOR_HANDLE depthSrvHandle,
         D3D12_GPU_DESCRIPTOR_HANDLE shadowSrvHandle,
-        D3D12_GPU_DESCRIPTOR_HANDLE iblSrvHandle, // Передаем IBL-дескрипторы
+        D3D12_GPU_DESCRIPTOR_HANDLE iblSrvHandle,
         const DirectX::XMMATRIX* lightViewProjMats,
-        const float* splitDepths);
+        const float* splitDepths,
+        bool useBeckmann);
 
     void DoPostProcessPass(ID3D12GraphicsCommandList* cmdList,
         D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,

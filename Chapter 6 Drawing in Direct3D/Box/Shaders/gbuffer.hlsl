@@ -96,6 +96,7 @@ PSOutput PS(VertexOut pin)
     float3 bumpedNormalW = NormalSampleToWorldSpace(normalMapSample, normalize(pin.NormalW), normalize(pin.TangentW));
     output.Normal = float4(bumpedNormalW, 0.0f);
 
+    // Считывание параметров PBR
     float metallic  = gMetallicMap.Sample(gsamLinear, pin.TexC).r;
     float roughness = gRoughnessMap.Sample(gsamLinear, pin.TexC).r;
 
